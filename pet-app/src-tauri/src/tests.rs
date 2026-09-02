@@ -397,6 +397,24 @@ mod tests {
         assert!(ev.session_name.contains("my-app"));
     }
 
+    #[test]
+    fn test_window_position_round_trip() {
+        let dir = std::env::temp_dir().join(format!(
+            "status-pet-position-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("pet_session.json");
+        crate::write_window_position(&path, tauri::PhysicalPosition::new(-320, 840));
+        let saved = crate::read_window_position(&path).expect("position should round-trip");
+        assert_eq!(saved.x, -320);
+        assert_eq!(saved.y, 840);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     // ── Helper ──
 
     fn make_stdin(

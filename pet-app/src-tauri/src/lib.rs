@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, PhysicalPosition, Position};
 
 pub mod adapter;
 pub mod status_map;
@@ -59,6 +59,33 @@ struct StatusPayload {
     event: String,
     session_id: String,
     session_name: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct SavedWindowPosition {
+    x: i32,
+    y: i32,
+}
+
+fn read_window_position(path: &PathBuf) -> Option<SavedWindowPosition> {
+    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_window_position(path: &PathBuf, position: PhysicalPosition<i32>) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let saved = SavedWindowPosition { x: position.x, y: position.y };
+    let Ok(content) = serde_json::to_vec(&saved) else { return };
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    if fs::write(&temporary, &content).is_ok() {
+        if fs::rename(&temporary, path).is_ok() {
+            return;
+        }
+        let _ = fs::remove_file(&temporary);
+    }
+    // Windows cannot always atomically replace an existing destination.
+    let _ = fs::write(path, content);
 }
 
 fn default_status_path() -> PathBuf {
@@ -879,6 +906,13 @@ pub fn run() {
     let lock_path_shared: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(initial_lock.clone()));
 
     let lock_for_cleanup = lock_path_shared.clone();
+    let position_path = if initial_session_id.is_empty() {
+        None
+    } else {
+        Some(default_pet_dir().join("positions").join(format!("{}.json", initial_session_id)))
+    };
+    let restore_position_path = position_path.clone();
+    let save_position_path = position_path.clone();
 
     tauri::Builder::default()
         .manage(status_path_shared)
@@ -888,6 +922,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
+
+            if let Some(path) = restore_position_path.as_ref() {
+                if let Some(saved) = read_window_position(path) {
+                    let _ = window.set_position(Position::Physical(PhysicalPosition::new(saved.x, saved.y)));
+                }
+            }
 
             // Set WebView2 background to transparent
             let _ = window.with_webview(|webview| {
@@ -1033,11 +1073,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(move |_window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
-                if let Some(lock) = lock_for_cleanup.lock().unwrap().as_ref() {
-                    let _ = fs::remove_file(lock);
+            match event {
+                tauri::WindowEvent::Moved(position) => {
+                    if let Some(path) = save_position_path.as_ref() {
+                        write_window_position(path, *position);
+                    }
                 }
-                // Don't delete status file — it belongs to the session, not the pet
+                tauri::WindowEvent::Destroyed => {
+                    if let Some(lock) = lock_for_cleanup.lock().unwrap().as_ref() {
+                        let _ = fs::remove_file(lock);
+                    }
+                    // Don't delete status file — it belongs to the session, not the pet
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
