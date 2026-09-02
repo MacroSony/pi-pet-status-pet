@@ -280,7 +280,7 @@ fn is_dlc_installed(assets_dir: tauri::State<'_, Option<PathBuf>>, dlc_name: Str
             return entries.filter_map(|e| e.ok()).any(|e| {
                 matches!(
                     e.path().extension().and_then(|ext| ext.to_str()),
-                    Some("gif" | "svg" | "png")
+                    Some("gif" | "svg" | "png" | "webp")
                 )
             });
         }
@@ -375,6 +375,7 @@ fn load_asset(assets_dir: tauri::State<'_, Option<PathBuf>>, path: String) -> Op
         "svg" => "image/svg+xml",
         "gif" => "image/gif",
         "png" => "image/png",
+        "webp" => "image/webp",
         _ => "application/octet-stream",
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -406,6 +407,7 @@ fn load_custom_asset(assets_dir: tauri::State<'_, Option<PathBuf>>, path: String
         "svg" => "image/svg+xml",
         "gif" => "image/gif",
         "png" => "image/png",
+        "webp" => "image/webp",
         _ => "application/octet-stream",
     };
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -502,7 +504,7 @@ fn scan_packs_in_dir(dir: &PathBuf, group: &str, packs: &mut Vec<CharacterPack>)
                 let has_images = fs::read_dir(&path).ok().map_or(false, |entries| {
                     entries.filter_map(|e| e.ok()).any(|e| {
                         let ext = e.path().extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
-                        ext == "gif" || ext == "svg" || ext == "png"
+                        ext == "gif" || ext == "svg" || ext == "png" || ext == "webp"
                     })
                 });
                 if has_images {

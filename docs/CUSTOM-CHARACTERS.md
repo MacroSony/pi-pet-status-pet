@@ -25,10 +25,11 @@ mkdir -p "$PACK_DIR"
 Each pet state needs at least one image. Multiple images per state adds variety (one is picked randomly).
 
 **Image requirements:**
-- Format: GIF (animated or static), PNG, or SVG
+- Format: animated WebP (preferred), GIF, PNG/APNG, or SVG
 - Transparent background strongly recommended
 - Square aspect ratio (~140×140px display area)
 - Keep file sizes reasonable (<2MB per image)
+- For AI-video output, convert the keyed MP4 to animated WebP; MP4 itself is not a character-pack format
 
 **Required states and suggested themes:**
 
@@ -72,7 +73,7 @@ Create `<pack-dir>/character.json`:
 ```
 
 **Important:**
-- `type` must be `"gif"`, `"png"`, or `"svg"`
+- `type` must be `"webp"`, `"gif"`, `"png"`, or `"svg"`
 - Image paths are relative to the `assets/` or `characters/` parent directory, prefixed with the pack name
 - Each state value is an **array** of paths (for random variety)
 - `name` is what appears in the right-click menu
