@@ -2,6 +2,8 @@
 
 const bubble = document.getElementById('speech-bubble');
 const statusText = document.getElementById('status-text');
+const stateGem = document.getElementById('state-gem');
+const stateGemTip = document.getElementById('state-gem-tip');
 const stateLabel = document.getElementById('state-label');
 const sessionNameEl = document.getElementById('session-name');
 const container = document.getElementById('pet-container');
@@ -148,7 +150,7 @@ const APPEARANCE_VALUES = Object.freeze({
   uiPreset: ['minimal', 'classic', 'debug'],
   artScale: null,
   bubble: ['off', 'alerts', 'all'],
-  stateLabel: ['off', 'alerts', 'always'],
+  stateLabel: ['off', 'minimal', 'alerts', 'always'],
   identity: ['hidden', 'hover', 'always'],
 });
 
@@ -167,6 +169,86 @@ const ASCII_ANIM_SPEED = {
 };
 const DEFAULT_ANIM_SPEED = 800;
 
+// ── Animation Queue & Priority System ──
+// Priority levels for animation playback and interruption:
+// 4: PRIORITY_ALERT      - Emergency interruption (error, waiting) — pre-empts all one-shots & loops immediately
+// 3: PRIORITY_REACTION   - Temporary emotional reaction; pre-empts normal
+//                          loops/transitions and returns to the business state
+// 2: PRIORITY_TRANSITION - State change one-shot transition (e.g. idle->editing)
+// 1: PRIORITY_VARIATION  - Idle random one-shot variation (~2s)
+// 0: PRIORITY_LOOP       - Base continuous state loop (idle, editing, etc.)
+const PRIORITY = {
+  LOOP: 0,
+  VARIATION: 1,
+  TRANSITION: 2,
+  REACTION: 3,
+  ALERT: 4,
+};
+
+const ALERT_STATES = new Set(['error', 'waiting']);
+
+// Helper functions for character.json v2 schema
+function getTransitionConfig(config, fromState, toState) {
+  if (!config || !config.transitions || typeof config.transitions !== 'object') return null;
+  const key = `${fromState}->${toState}`;
+  const entry = config.transitions[key];
+  if (!entry) return null;
+
+  if (typeof entry === 'string') {
+    return { frames: [entry], duration_ms: 1000 };
+  }
+  if (Array.isArray(entry)) {
+    const frames = entry.filter(f => typeof f === 'string');
+    return frames.length > 0 ? { frames, duration_ms: 1000 } : null;
+  }
+  if (typeof entry === 'object' && entry !== null) {
+    let frames = [];
+    if (typeof entry.frames === 'string') frames = [entry.frames];
+    else if (Array.isArray(entry.frames)) frames = entry.frames.filter(f => typeof f === 'string');
+    const duration_ms = (typeof entry.duration_ms === 'number' && entry.duration_ms > 0) ? entry.duration_ms : 1000;
+    if (frames.length === 0) return null;
+    return { frames, duration_ms };
+  }
+  return null;
+}
+
+function getIdleVariations(config) {
+  if (!config || !config.idle_variations) return [];
+  const raw = config.idle_variations;
+  let list = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === 'object' && raw !== null && raw.idle) {
+    list = Array.isArray(raw.idle) ? raw.idle : [raw.idle];
+  } else if (typeof raw === 'string') {
+    list = [raw];
+  }
+
+  const normalized = [];
+  for (const item of list) {
+    if (typeof item === 'string') {
+      normalized.push({ frames: [item], duration_ms: 2000 });
+    } else if (Array.isArray(item)) {
+      const frames = item.filter(f => typeof f === 'string');
+      if (frames.length > 0) normalized.push({ frames, duration_ms: 2000 });
+    } else if (typeof item === 'object' && item !== null) {
+      let frames = [];
+      if (typeof item.frames === 'string') frames = [item.frames];
+      else if (Array.isArray(item.frames)) frames = item.frames.filter(f => typeof f === 'string');
+      const duration_ms = (typeof item.duration_ms === 'number' && item.duration_ms > 0) ? item.duration_ms : 2000;
+      if (frames.length > 0) normalized.push({ frames, duration_ms });
+    }
+  }
+  return normalized;
+}
+
+function getAutoReturnSeconds(config) {
+  if (config && typeof config.auto_return_seconds === 'number' && config.auto_return_seconds > 0) {
+    return config.auto_return_seconds;
+  }
+  return 90;
+}
+
 // ── State ──
 let mode = localStorage.getItem('petMode') || 'ferris';
 let eye = localStorage.getItem('petEye') || '·';
@@ -177,6 +259,8 @@ let petTextColor = localStorage.getItem('petTextColor') || '';
 let petSessionBg = localStorage.getItem('petSessionBg') || '';
 let petFontSize = parseInt(localStorage.getItem('petFontSize') || '16');
 let petScale = parseFloat(localStorage.getItem('petScale') || '1');
+let currentBusinessState = 'idle';
+let visualState = 'idle';
 let currentState = 'idle';
 let activeCharacterConfig = null;
 let latestStatus = null;
@@ -192,6 +276,13 @@ let availableDlcs = [];  // [{id, name, installed}] from dlc/*.json
 let boundSessionId = '';
 let sessionPoll = null;
 const dlcInstalledCache = {};
+
+let activeOneShot = null;      // Currently active one-shot { type, priority, targetState, timerIds }
+let autoReturnTimer = null;    // Timer for auto-return decay
+let idleVariationTimer = null; // Timer for idle variation triggers
+let statusUpdateVersion = 0;
+let reactionRequestVersion = 0;
+const consumedReactionIds = new Set();
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -253,6 +344,17 @@ function shouldShowStateLabel(state) {
   return policy === 'always' || (policy === 'alerts' && (state === 'waiting' || state === 'error'));
 }
 
+function shouldShowStateGem() {
+  const policy = activeAppearance().stateLabel;
+  return policy === 'minimal';
+}
+
+function updateStateGemTipText(state, detail) {
+  if (!stateGemTip) return;
+  const tipDetail = (state === 'offline' && !detail) ? 'Zzz...' : detail;
+  stateGemTip.textContent = tipDetail ? `${state}: ${tipDetail}` : state;
+}
+
 // ── Apply visual config ──
 function applyConfig() {
   const colorProps = [
@@ -270,6 +372,19 @@ function applyConfig() {
   // Sync bubble border + tail with label background color
   const bubbleColor = petSessionBg && petSessionBg !== 'transparent' ? petSessionBg : '';
   bubble.style.setProperty('--bubble-color', bubbleColor);
+  if (stateGem) {
+    if (petColor) {
+      stateGem.style.setProperty('--gem-color', petColor);
+    } else {
+      stateGem.style.removeProperty('--gem-color');
+    }
+    const gemSize = Math.round(10 * petScale);
+    stateGem.style.width = gemSize + 'px';
+    stateGem.style.height = gemSize + 'px';
+  }
+  if (stateGemTip) {
+    stateGemTip.style.fontSize = Math.round(11 * petScale) + 'px';
+  }
   asciiPre.style.fontSize = petFontSize + 'px';
   container.style.width = Math.round(200 * petScale) + 'px';
   container.style.height = Math.round(240 * petScale) + 'px';
@@ -288,10 +403,15 @@ function applyConfig() {
   bubble.style.maxWidth = Math.round(180 * petScale) + 'px';
   container.dataset.identity = identityPinned ? 'pinned' : appearance.identity;
   container.dataset.bubble = appearance.bubble;
-  container.dataset.bubbleVisible = shouldShowBubble(currentState) ? 'true' : 'false';
+  container.dataset.bubbleVisible = shouldShowBubble(currentBusinessState) ? 'true' : 'false';
   container.dataset.stateLabel = appearance.stateLabel;
-  setVisualAnimation(currentState);
-  stateLabel.hidden = !shouldShowStateLabel(currentState);
+  setVisualAnimation(visualState);
+  stateLabel.hidden = !shouldShowStateLabel(currentBusinessState);
+  if (stateGem) {
+    stateGem.hidden = !shouldShowStateGem();
+  }
+  const currentDetail = (latestStatus && latestStatus.detail) || (statusText ? statusText.textContent : '');
+  updateStateGemTipText(currentBusinessState, currentDetail);
 
   // Resize window to match
   if (window.__TAURI__) {
@@ -339,8 +459,15 @@ function setImage(src) {
   currentImgSrc = resolved;
 }
 
-// Show ASCII 404 art when image fails to load
+// Show ASCII 404 art when image fails to load, unless playing a one-shot (silent degradation)
 imgEl.addEventListener('error', () => {
+  if (activeOneShot) {
+    const fallbackState = activeOneShot.targetState || visualState || 'idle';
+    cancelActiveOneShot();
+    startStateLoop(fallbackState);
+    return;
+  }
+
   if (imgEl.src && imgEl.src !== window.location.href) {
     const name = decodeURIComponent(imgEl.src.split('/').pop().split('?')[0]);
     // Switch to ASCII 404 display
@@ -370,7 +497,7 @@ function startAsciiAnimation(frames) {
   asciiFrame = 0;
   renderAsciiFrame(frames, 0);
   if (frames.length > 1) {
-    const speed = ASCII_ANIM_SPEED[currentState] || DEFAULT_ANIM_SPEED;
+    const speed = ASCII_ANIM_SPEED[visualState] || DEFAULT_ANIM_SPEED;
     asciiInterval = setInterval(() => {
       asciiFrame++;
       renderAsciiFrame(frames, asciiFrame);
@@ -378,9 +505,349 @@ function startAsciiAnimation(frames) {
   }
 }
 
+// ── Animation Queue & Playback Functions ──
+
+function cancelActiveOneShot() {
+  if (!activeOneShot) return;
+  if (Array.isArray(activeOneShot.timerIds)) {
+    activeOneShot.timerIds.forEach(id => clearTimeout(id));
+  }
+  if (typeof activeOneShot.cancel === 'function') {
+    activeOneShot.cancel();
+  }
+  activeOneShot = null;
+}
+
+async function verifyImageAsset(path) {
+  if (!path) return null;
+  try {
+    const resolved = await loadAsset(path);
+    const url = assetUrl(path);
+    return new Promise((resolve) => {
+      let settled = false;
+      const img = new Image();
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      }, 2000);
+      img.onload = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(url);
+        }
+      };
+      img.onerror = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
+      };
+      img.src = url;
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+function startStateLoop(state) {
+  cancelActiveOneShot();
+  visualState = state;
+  currentState = currentBusinessState;
+
+  if (mode === 'ferris') {
+    showImage();
+    const sprites = FERRIS_SVG_MAP[state] || FERRIS_SVG_MAP.idle || ['ferris/1.svg'];
+    setImage(pickRandom(sprites));
+  } else if (GIF_MODES[mode]) {
+    showImage();
+    const map = GIF_MODES[mode];
+    setImage(pickRandom(map[state] || map.idle || []));
+  } else {
+    showAscii();
+    const species = ASCII_SPECIES[mode];
+    if (species) {
+      const stateKey = (state === 'delegating') ? 'working' : state;
+      startAsciiAnimation(species[stateKey] || species.idle);
+    }
+  }
+
+  setVisualAnimation(state);
+
+  if (state === 'idle') {
+    scheduleNextIdleVariation();
+  } else {
+    clearTimeout(idleVariationTimer);
+    idleVariationTimer = null;
+  }
+}
+
+async function playTransition(fromState, toState, transitionConfig) {
+  cancelActiveOneShot();
+  clearTimeout(idleVariationTimer);
+  idleVariationTimer = null;
+
+  const frames = transitionConfig.frames || [];
+  const duration = transitionConfig.duration_ms || 1000;
+
+  if (!frames.length || (mode !== 'ferris' && !GIF_MODES[mode])) {
+    startStateLoop(toState);
+    return;
+  }
+
+  // Pre-verify all frames for silent degradation
+  const verifiedUrls = [];
+  for (const f of frames) {
+    const url = await verifyImageAsset(f);
+    if (!url) {
+      // Missing asset: silent fallback to normal loop with ~150ms fade
+      startStateLoop(toState);
+      return;
+    }
+    verifiedUrls.push(url);
+  }
+
+  const timerIds = [];
+  const oneShot = {
+    type: 'transition',
+    priority: PRIORITY.TRANSITION,
+    targetState: toState,
+    timerIds,
+  };
+  activeOneShot = oneShot;
+
+  showImage();
+  setVisualAnimation('appear');
+
+  if (verifiedUrls.length === 1) {
+    setImage(frames[0]);
+    const endTimer = setTimeout(() => {
+      if (activeOneShot === oneShot) {
+        activeOneShot = null;
+        startStateLoop(toState);
+      }
+    }, duration);
+    timerIds.push(endTimer);
+  } else {
+    const frameTime = Math.max(50, Math.floor(duration / verifiedUrls.length));
+    setImage(frames[0]);
+    for (let idx = 1; idx < verifiedUrls.length; idx++) {
+      const ft = setTimeout(() => {
+        if (activeOneShot === oneShot) {
+          imgEl.src = verifiedUrls[idx];
+          currentImgSrc = verifiedUrls[idx];
+          imgEl.style.opacity = '1';
+        }
+      }, idx * frameTime);
+      timerIds.push(ft);
+    }
+
+    const endTimer = setTimeout(() => {
+      if (activeOneShot === oneShot) {
+        activeOneShot = null;
+        startStateLoop(toState);
+      }
+    }, duration);
+    timerIds.push(endTimer);
+  }
+}
+
+async function playIdleVariation(variationConfig) {
+  if (visualState !== 'idle' || activeOneShot) return;
+
+  const frames = variationConfig.frames || [];
+  const duration = variationConfig.duration_ms || 2000;
+
+  if (!frames.length || (mode !== 'ferris' && !GIF_MODES[mode])) {
+    scheduleNextIdleVariation();
+    return;
+  }
+
+  // Pre-verify assets
+  const verifiedUrls = [];
+  for (const f of frames) {
+    const url = await verifyImageAsset(f);
+    if (!url) {
+      // Missing asset: silently skip this variation
+      scheduleNextIdleVariation();
+      return;
+    }
+    verifiedUrls.push(url);
+  }
+
+  const timerIds = [];
+  const oneShot = {
+    type: 'variation',
+    priority: PRIORITY.VARIATION,
+    targetState: 'idle',
+    timerIds,
+  };
+  activeOneShot = oneShot;
+
+  showImage();
+
+  if (verifiedUrls.length === 1) {
+    setImage(frames[0]);
+    const endTimer = setTimeout(() => {
+      if (activeOneShot === oneShot) {
+        activeOneShot = null;
+        startStateLoop('idle');
+      }
+    }, duration);
+    timerIds.push(endTimer);
+  } else {
+    const frameTime = Math.max(50, Math.floor(duration / verifiedUrls.length));
+    setImage(frames[0]);
+    for (let idx = 1; idx < verifiedUrls.length; idx++) {
+      const ft = setTimeout(() => {
+        if (activeOneShot === oneShot) {
+          imgEl.src = verifiedUrls[idx];
+          currentImgSrc = verifiedUrls[idx];
+          imgEl.style.opacity = '1';
+        }
+      }, idx * frameTime);
+      timerIds.push(ft);
+    }
+
+    const endTimer = setTimeout(() => {
+      if (activeOneShot === oneShot) {
+        activeOneShot = null;
+        startStateLoop('idle');
+      }
+    }, duration);
+    timerIds.push(endTimer);
+  }
+}
+
+function triggerIdleVariation() {
+  if (visualState !== 'idle' || activeOneShot) return;
+  const cfg = activeCharacterConfig || CHARACTER_CONFIGS[mode];
+  const variations = getIdleVariations(cfg);
+  if (!variations.length) {
+    scheduleNextIdleVariation();
+    return;
+  }
+  const picked = pickRandom(variations);
+  playIdleVariation(picked);
+}
+
+function scheduleNextIdleVariation() {
+  clearTimeout(idleVariationTimer);
+  idleVariationTimer = setTimeout(() => {
+    triggerIdleVariation();
+  }, 30000);
+}
+
+function scheduleAutoReturn(state) {
+  clearTimeout(autoReturnTimer);
+  autoReturnTimer = null;
+
+  // Alerts (error, waiting) do not decay
+  if (ALERT_STATES.has(state) || state === 'idle') {
+    return;
+  }
+
+  const cfg = activeCharacterConfig || CHARACTER_CONFIGS[mode];
+  const returnSec = getAutoReturnSeconds(cfg);
+
+  autoReturnTimer = setTimeout(() => {
+    onAutoReturnDecay();
+  }, returnSec * 1000);
+}
+
+function onAutoReturnDecay() {
+  if (ALERT_STATES.has(currentBusinessState) || visualState === 'idle') {
+    return;
+  }
+
+  const cfg = activeCharacterConfig || CHARACTER_CONFIGS[mode];
+  const trans = getTransitionConfig(cfg, visualState, 'idle');
+  if (trans) {
+    playTransition(visualState, 'idle', trans);
+  } else {
+    cancelActiveOneShot();
+    startStateLoop('idle');
+  }
+}
+
+function reactionIsExpired(reaction) {
+  const ts = Number(reaction && reaction.ts);
+  const ttl = Number(reaction && reaction.ttl_ms);
+  return !Number.isFinite(ts) || !Number.isFinite(ttl) || ttl < 0 || Date.now() > ts + ttl;
+}
+
+function rememberReaction(id) {
+  if (typeof id !== 'string' || !id || consumedReactionIds.has(id)) return false;
+  consumedReactionIds.add(id);
+  return true;
+}
+
+async function playReaction(reaction, requestVersion) {
+  if (ALERT_STATES.has(currentBusinessState)) return;
+  const statusVersion = statusUpdateVersion;
+  const extensions = ['webp', 'gif', 'svg'];
+  let reactionPath = null;
+
+  // Try the convention-based files in order; missing assets are optional.
+  for (const extension of extensions) {
+    const candidate = `${mode}/reaction_${reaction.emotion}.${extension}`;
+    const url = await verifyImageAsset(candidate);
+    if (requestVersion !== reactionRequestVersion || statusVersion !== statusUpdateVersion) return;
+    if (url) {
+      reactionPath = candidate;
+      break;
+    }
+  }
+  if (!reactionPath || ALERT_STATES.has(currentBusinessState)) return;
+
+  // Only pre-empt the current lower-priority animation after an asset was
+  // found; a missing reaction must leave the normal animation untouched.
+  cancelActiveOneShot();
+  clearTimeout(idleVariationTimer);
+  idleVariationTimer = null;
+  const timerIds = [];
+  const oneShot = {
+    type: 'reaction',
+    priority: PRIORITY.REACTION,
+    targetState: currentBusinessState,
+    timerIds,
+  };
+  activeOneShot = oneShot;
+  showImage();
+  setVisualAnimation('reaction');
+  setImage(reactionPath);
+
+  const endTimer = setTimeout(() => {
+    if (activeOneShot === oneShot) {
+      activeOneShot = null;
+      startStateLoop(oneShot.targetState);
+    }
+  }, 2500);
+  timerIds.push(endTimer);
+}
+
+function handleReactionEvent(reaction) {
+  if (!reaction || !rememberReaction(reaction.id) || reactionIsExpired(reaction)) return;
+  // `message` and `speak` are reserved for the phase-two bubble/TTS interface.
+  if (ALERT_STATES.has(currentBusinessState)) return;
+  const requestVersion = ++reactionRequestVersion;
+  playReaction(reaction, requestVersion);
+}
+
 // ── Main update ──
 
 function updateStatus(status) {
+  statusUpdateVersion++;
+  // Any business-status event wins over a temporary reaction, including an
+  // update that repeats the same state.
+  const reactionWasActive = activeOneShot && activeOneShot.type === 'reaction';
+  if (reactionWasActive) {
+    reactionRequestVersion++;
+    cancelActiveOneShot();
+  }
   latestStatus = status;
   const state = status.state || 'idle';
   const detail = status.detail || '';
@@ -396,31 +863,18 @@ function updateStatus(status) {
     sessionNameEl.title = sessionName;
   }
 
-  if (mode === 'ferris') {
-    showImage();
-    const sprites = FERRIS_SVG_MAP[state] || FERRIS_SVG_MAP.idle;
-    setImage(pickRandom(sprites));
-  } else if (GIF_MODES[mode]) {
-    showImage();
-    const map = GIF_MODES[mode];
-    setImage(pickRandom(map[state] || map.idle));
-  } else {
-    showAscii();
-    const species = ASCII_SPECIES[mode];
-    if (species) {
-      const stateKey = (state === 'delegating') ? 'working' : state;
-      startAsciiAnimation(species[stateKey] || species.idle);
-    }
-  }
+  const previousBusinessState = currentBusinessState;
+  const stateChanged = (state !== previousBusinessState);
+  currentBusinessState = state;
+  currentState = state;
 
-  if (state !== currentState) {
-    currentState = state;
-    setVisualAnimation('appear');
-    setTimeout(() => { if (currentState === state) setVisualAnimation(state); }, 400);
-  }
-
+  // Status text and state label always display the true business state immediately
   stateLabel.textContent = state;
   stateLabel.hidden = !shouldShowStateLabel(state);
+  if (stateGem) {
+    stateGem.hidden = !shouldShowStateGem();
+  }
+  updateStateGemTipText(state, detail);
 
   // Bubble policy can be off, alerts-only, or legacy all-states.
   container.dataset.bubbleVisible = (shouldShowBubble(state) && (!!detail || state === 'offline')) ? 'true' : 'false';
@@ -447,6 +901,38 @@ function updateStatus(status) {
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     bubbleTimeout = setTimeout(() => { bubble.classList.add('hidden'); }, 30000);
+  }
+
+  // Reset / reschedule auto-return timer on status update
+  scheduleAutoReturn(state);
+
+  // Priority handling:
+  // 1. Alert states (error, waiting) IMMEDIATELY interrupt everything and jump directly to alert loop
+  if (ALERT_STATES.has(state)) {
+    cancelActiveOneShot();
+    clearTimeout(idleVariationTimer);
+    idleVariationTimer = null;
+    startStateLoop(state);
+    return;
+  }
+
+  // Restore the same business loop when a same-state update interrupts a
+  // reaction; otherwise the normal state-change handling below applies.
+  if (reactionWasActive && !stateChanged && visualState === state) {
+    startStateLoop(state);
+    return;
+  }
+
+  // 2. State transition / loop
+  if (stateChanged || visualState !== state) {
+    const cfg = activeCharacterConfig || CHARACTER_CONFIGS[mode];
+    const trans = getTransitionConfig(cfg, visualState, state);
+    if (trans) {
+      playTransition(visualState, state, trans);
+    } else {
+      cancelActiveOneShot();
+      startStateLoop(state);
+    }
   }
 }
 
@@ -616,7 +1102,7 @@ function buildConfigPage() {
   addChoiceRow(charMenu, 'UI', appearance.uiPreset, [['minimal', 'Minimal'], ['classic', 'Classic'], ['debug', 'Debug']], (v) => setAppearance('uiPreset', v));
   addSliderRow(charMenu, 'Art size', appearance.artScale, 0.7, 1.5, 0.05, (v) => setAppearance('artScale', v), '%');
   addChoiceRow(charMenu, 'Bubble', appearance.bubble, [['off', 'Off'], ['alerts', 'Alerts'], ['all', 'All']], (v) => setAppearance('bubble', v));
-  addChoiceRow(charMenu, 'State', appearance.stateLabel, [['off', 'Off'], ['alerts', 'Alerts'], ['always', 'Always']], (v) => setAppearance('stateLabel', v));
+  addChoiceRow(charMenu, 'State', appearance.stateLabel, [['off', 'Off'], ['minimal', 'Minimal'], ['alerts', 'Alerts'], ['always', 'Always']], (v) => setAppearance('stateLabel', v));
   addChoiceRow(charMenu, 'Identity', appearance.identity, [['hidden', 'Hidden'], ['hover', 'Hover'], ['always', 'Always']], (v) => { identityPinned = false; localStorage.removeItem('petIdentityPinned'); setAppearance('identity', v); });
   if (sessionNameEl.textContent) addMenuItem(charMenu, identityPinned ? 'Unpin identity' : 'Pin identity', () => { identityPinned = !identityPinned; localStorage.setItem('petIdentityPinned', String(identityPinned)); applyConfig(); buildConfigPage(); });
   addDivider(charMenu);
@@ -629,6 +1115,7 @@ function buildConfigPage() {
   addMenuItem(charMenu, 'Update Assets', async () => {
     closeMenu();
     stateLabel.textContent = 'downloading';
+    updateStateGemTipText('downloading', 'Updating assets...');
     setVisualAnimation('thinking');
     statusText.textContent = 'Updating assets...';
     bubble.classList.remove('hidden');
@@ -644,17 +1131,20 @@ function buildConfigPage() {
       statusText.textContent = 'Assets updated!';
       setVisualAnimation('idle');
       stateLabel.textContent = 'idle';
+      updateStateGemTipText('idle', 'Assets updated!');
       clearTimeout(bubbleTimeout);
       bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 5000);
     } catch(e) {
       statusText.textContent = 'Update failed: ' + (e || 'unknown error');
       setVisualAnimation('error');
       stateLabel.textContent = 'error';
+      updateStateGemTipText('error', String(e || 'unknown error'));
       clearTimeout(bubbleTimeout);
       bubbleTimeout = setTimeout(() => {
         bubble.classList.add('hidden');
         setVisualAnimation('idle');
         stateLabel.textContent = 'idle';
+        updateStateGemTipText('idle', '');
       }, 8000);
     }
   });
@@ -696,6 +1186,7 @@ async function downloadAndSelectDlc(dlcName) {
 
   // Show downloading state with animation
   stateLabel.textContent = 'downloading';
+  updateStateGemTipText('downloading', dlcName);
   setVisualAnimation('thinking');
   statusText.textContent = 'Downloading ' + dlcName + '...';
   bubble.classList.remove('hidden');
@@ -732,8 +1223,14 @@ async function selectChar(newMode) {
   currentImgSrc = '';
   imgEl.src = '';
 
+  cancelActiveOneShot();
+  clearTimeout(autoReturnTimer);
+  autoReturnTimer = null;
+  clearTimeout(idleVariationTimer);
+  idleVariationTimer = null;
+
   // Show the character immediately with whatever is available
-  updateStatus({ state: currentState, detail: statusText.textContent });
+  updateStatus({ state: currentBusinessState, detail: statusText.textContent });
 
   // Preload remaining assets in the background
   if (GIF_MODES[mode] && hasExternalAssets) {
@@ -770,6 +1267,16 @@ for (const el of [imgWrapper, asciiPre, bubble, stateLabel]) {
   el.addEventListener('mousedown', startDrag);
 }
 
+// State gem hover interaction
+if (stateGem && stateGemTip) {
+  stateGem.addEventListener('mouseenter', () => {
+    stateGemTip.classList.remove('hidden');
+  });
+  stateGem.addEventListener('mouseleave', () => {
+    stateGemTip.classList.add('hidden');
+  });
+}
+
 // ── Session picker ──
 async function showSessionPicker() {
   if (sessionPoll) { clearInterval(sessionPoll); sessionPoll = null; }
@@ -778,6 +1285,7 @@ async function showSessionPicker() {
     statusText.textContent = 'No session found. Please restart your AI assistant.';
     bubble.classList.remove('hidden');
     stateLabel.textContent = 'waiting';
+    updateStateGemTipText('waiting', 'No session found');
     sessionPoll = setInterval(async () => {
       const s = await window.__TAURI__.core.invoke('list_unlocked_sessions');
       if (s.length > 0) { clearInterval(sessionPoll); sessionPoll = null; showSessionPicker(); }
@@ -806,6 +1314,7 @@ async function bindToSession(sessionId) {
 // ── Listen for status updates ──
 if (window.__TAURI__) {
   window.__TAURI__.event.listen('status-update', (e) => updateStatus(e.payload));
+  window.__TAURI__.event.listen('reaction-event', (e) => handleReactionEvent(e.payload));
   window.__TAURI__.core.invoke('get_session_id').then((sid) => {
     if (sid) {
       boundSessionId = sid;
@@ -816,17 +1325,20 @@ if (window.__TAURI__) {
   });
   window.__TAURI__.core.invoke('get_status').then((s) => { if (s) updateStatus(s); });
 } else {
+  // Browser demo mode: demo cycle showcasing transitions and state loops
   const demos = [
-    { state: 'idle', detail: 'Waiting...' },
-    { state: 'thinking', detail: 'Processing prompt...' },
-    { state: 'editing', detail: 'Editing main.rs' },
-    { state: 'searching', detail: 'Searching: TODO' },
-    { state: 'delegating', detail: 'Spawning agent...' },
-    { state: 'idle', detail: 'Done!' },
+    { state: 'idle', detail: 'Waiting for prompt...' },
+    { state: 'editing', detail: 'Editing src/app.js' },
+    { state: 'searching', detail: 'Searching codebase...' },
+    { state: 'running', detail: 'Running tests...' },
+    { state: 'idle', detail: 'Task completed!' },
+    { state: 'thinking', detail: 'Thinking deeply...' },
+    { state: 'waiting', detail: 'Awaiting user confirmation' },
+    { state: 'error', detail: 'Error encountered!' },
     { state: 'offline', detail: 'Session ended' },
   ];
   let i = 0;
-  setInterval(() => updateStatus(demos[i++ % demos.length]), 2500);
+  setInterval(() => updateStatus(demos[i++ % demos.length]), 4000);
 }
 
 // ── Asset loading ──
@@ -847,23 +1359,27 @@ async function initAssets() {
       if (dlcs.length === 0) {
         // Assets dir exists but has no DLC configs — need to download
         stateLabel.textContent = 'downloading';
+        updateStateGemTipText('downloading', 'Downloading assets...');
         setVisualAnimation('thinking');
         statusText.textContent = 'Downloading assets...';
         bubble.classList.remove('hidden');
         try {
           await window.__TAURI__.core.invoke('update_assets');
           statusText.textContent = 'Assets ready!';
+          updateStateGemTipText('idle', 'Assets ready!');
           clearTimeout(bubbleTimeout);
           bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 3000);
         } catch(e) {
           statusText.textContent = 'Assets download failed: ' + (e || 'unknown error');
           setVisualAnimation('error');
           stateLabel.textContent = 'error';
+          updateStateGemTipText('error', String(e || 'unknown error'));
           clearTimeout(bubbleTimeout);
           bubbleTimeout = setTimeout(() => {
             bubble.classList.add('hidden');
             setVisualAnimation('idle');
             stateLabel.textContent = 'idle';
+            updateStateGemTipText('idle', '');
           }, 8000);
         }
       }
@@ -890,7 +1406,7 @@ function assetUrl(path) {
   return assetCache[path] || path;
 }
 
-// Preload only the active mode's assets
+// Preload only the active mode's assets (including transitions and variations)
 async function preloadAssets() {
   let paths = [];
   if (GIF_MODES[mode]) {
@@ -898,7 +1414,24 @@ async function preloadAssets() {
   } else if (mode === 'ferris') {
     for (const svgs of Object.values(FERRIS_SVG_MAP)) for (const s of svgs) paths.push(s);
   }
-  await Promise.all([...new Set(paths)].map(p => loadAsset(p)));
+  const cfg = activeCharacterConfig || CHARACTER_CONFIGS[mode];
+  if (cfg) {
+    if (cfg.transitions && typeof cfg.transitions === 'object') {
+      for (const t of Object.values(cfg.transitions)) {
+        if (typeof t === 'string') paths.push(t);
+        else if (Array.isArray(t)) for (const f of t) if (typeof f === 'string') paths.push(f);
+        else if (typeof t === 'object' && t !== null) {
+          if (typeof t.frames === 'string') paths.push(t.frames);
+          else if (Array.isArray(t.frames)) for (const f of t.frames) if (typeof f === 'string') paths.push(f);
+        }
+      }
+    }
+    const variations = getIdleVariations(cfg);
+    for (const v of variations) {
+      for (const f of v.frames) paths.push(f);
+    }
+  }
+  await Promise.all([...new Set(paths.filter(Boolean))].map(p => loadAsset(p)));
 }
 
 // ── Init ──
@@ -916,6 +1449,18 @@ async function preloadAssets() {
     if (resp.ok) {
       const config = await resp.json();
       FERRIS_SVG_MAP = config.states;
+      if (!window.__TAURI__ && (!config.transitions || Object.keys(config.transitions).length === 0)) {
+        config.transitions = {
+          'idle->editing': { frames: ['ferris/14.svg'], duration_ms: 1000 },
+          'editing->searching': { frames: ['ferris/10.svg'], duration_ms: 1000 },
+          'searching->running': { frames: ['ferris/3.svg'], duration_ms: 1000 },
+          'running->idle': { frames: ['ferris/15.svg'], duration_ms: 1000 },
+        };
+        config.idle_variations = {
+          idle: ['ferris/2.svg', 'ferris/15.svg'],
+        };
+      }
+      registerCharacterConfig('ferris', config);
       CHARACTER_CONFIGS.ferris = config;
     }
   } catch(e) {}

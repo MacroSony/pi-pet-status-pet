@@ -1,6 +1,10 @@
 {
   "name": "Ferris",
+  "version": 2,
   "type": "svg",
+  "transitions": {},
+  "idle_variations": {},
+  "auto_return_seconds": 90,
   "states": {
     "idle":       ["ferris/1.svg"],
     "thinking":   ["ferris/3.svg", "ferris/14.svg"],

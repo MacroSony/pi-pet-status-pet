@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, PhysicalPosition, Position};
 
@@ -13,6 +13,7 @@ pub mod status_map;
 mod tests;
 
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const ASSETS_REPO: &str = "moeyui1/claude-status-pet";
 
@@ -61,6 +62,16 @@ struct StatusPayload {
     session_name: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct ReactionPayload {
+    id: String,
+    emotion: String,
+    message: String,
+    speak: bool,
+    ts: u64,
+    ttl_ms: u64,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct SavedWindowPosition {
     x: i32,
@@ -77,15 +88,32 @@ fn write_window_position(path: &PathBuf, position: PhysicalPosition<i32>) {
     }
     let saved = SavedWindowPosition { x: position.x, y: position.y };
     let Ok(content) = serde_json::to_vec(&saved) else { return };
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    if fs::write(&temporary, &content).is_ok() {
-        if fs::rename(&temporary, path).is_ok() {
-            return;
-        }
-        let _ = fs::remove_file(&temporary);
+    let _ = write_json_atomic(path, &content);
+}
+
+/// Write a file through a sibling temporary file, then rename it into place.
+/// The direct-write fallback preserves the existing Windows behavior when the
+/// platform refuses to rename over an open destination.
+fn write_json_atomic(path: &PathBuf, content: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    // Windows cannot always atomically replace an existing destination.
-    let _ = fs::write(path, content);
+    let counter = WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), counter));
+    fs::write(&temporary, content)?;
+    match fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            let _ = fs::remove_file(&temporary);
+            // Windows cannot always atomically replace an existing destination.
+            fs::write(path, content).map_err(|write_error| {
+                std::io::Error::new(
+                    write_error.kind(),
+                    format!("rename failed ({}); direct write failed: {}", rename_error, write_error),
+                )
+            })
+        }
+    }
 }
 
 fn default_status_path() -> PathBuf {
@@ -107,6 +135,24 @@ fn read_status(path: &PathBuf) -> Option<StatusPayload> {
         session_id: v["session_id"].as_str().unwrap_or("").to_string(),
         session_name: v["session_name"].as_str().unwrap_or("").to_string(),
     })
+}
+
+fn read_reaction(path: &PathBuf, log_path: &PathBuf) -> Option<ReactionPayload> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) => {
+            debug_log(log_path, &format!("Reaction read failed: {}", e));
+            return None;
+        }
+    };
+    match serde_json::from_str::<ReactionPayload>(&content) {
+        Ok(payload) => Some(payload),
+        Err(e) => {
+            // Reaction files are an optional channel; malformed files are ignored.
+            debug_log(log_path, &format!("Reaction JSON ignored: {}", e));
+            None
+        }
+    }
 }
 
 #[tauri::command]
@@ -206,9 +252,13 @@ fn bind_session(
         let _ = app.emit("status-update", status);
     }
 
-    // Start file watcher in a background thread
+    // Start file watcher in a background thread. Both files live in the same
+    // directory, so one watcher can service the bound status and reaction.
     let watch_path = status_file.clone();
+    let reaction_path = pet_dir.join(format!("reaction-{}.json", session_id));
     let log_path = status_file.clone();
+    let bound_session_state = session_id_state.inner().clone();
+    let bound_session = session_id.clone();
     let handle = app.clone();
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -232,19 +282,35 @@ fn bind_session(
 
         for event in rx {
             if let Ok(event) = event {
-                let is_our_file = event.paths.iter().any(|p| *p == watch_path);
-                if !is_our_file { continue; }
+                // A previous bind watcher may still be draining its channel.
+                // Do not let it emit after the frontend has switched sessions.
+                if *bound_session_state.lock().unwrap() != bound_session {
+                    continue;
+                }
+                let is_status_file = event.paths.iter().any(|p| *p == watch_path);
+                let is_reaction_file = event.paths.iter().any(|p| *p == reaction_path);
+                if !is_status_file && !is_reaction_file { continue; }
                 debug_log(&log_path, &format!("bind_session event: {:?}, paths: {:?}", event.kind, event.paths));
                 match event.kind {
                     EventKind::Modify(_) | EventKind::Create(_) => {
                         std::thread::sleep(std::time::Duration::from_millis(50));
-                        if let Some(status) = read_status(&watch_path) {
+                        if *bound_session_state.lock().unwrap() != bound_session {
+                            continue;
+                        }
+                        if is_reaction_file {
+                            if let Some(reaction) = read_reaction(&reaction_path, &log_path) {
+                                let _ = handle.emit("reaction-event", reaction);
+                            }
+                        } else if let Some(status) = read_status(&watch_path) {
                             debug_log(&log_path, &format!("bind_session emit: state={}, detail={}", status.state, status.detail));
                             let _ = handle.emit("status-update", status);
                         }
                     }
-                    EventKind::Remove(_) => {
+                    EventKind::Remove(_) if is_status_file => {
                         std::thread::sleep(std::time::Duration::from_millis(300));
+                        if *bound_session_state.lock().unwrap() != bound_session {
+                            continue;
+                        }
                         if watch_path.exists() {
                             if let Some(status) = read_status(&watch_path) {
                                 let _ = handle.emit("status-update", status);
@@ -605,7 +671,8 @@ fn cmd_write_status(args: &[String]) {
             "event": event, "session_id": session_id,
             "session_name": session_name, "timestamp": timestamp()
         });
-        let _ = fs::write(&status_file, status.to_string());
+        let content = status.to_string();
+        let _ = write_json_atomic(&status_file, content.as_bytes());
     }
 
     // Output session info to stdout (hook script captures this to launch GUI)
@@ -613,6 +680,66 @@ fn cmd_write_status(args: &[String]) {
 
     debug_log(&log_path, &format!("file written in {:?}", t0.elapsed()));
     debug_log(&log_path, &format!("write-status DONE in {:?}", t0.elapsed()));
+}
+
+/// CLI: write one temporary reaction event for a session.
+fn cmd_react(args: &[String]) {
+    init_debug(args);
+    let pet_dir = default_pet_dir();
+    if let Err(e) = fs::create_dir_all(&pet_dir) {
+        eprintln!("Failed to create pet data directory: {}", e);
+        std::process::exit(1);
+    }
+    let log_path = pet_dir.join("pet-debug.log");
+
+    let emotion = get_arg(args, "--emotion").unwrap_or_default();
+    if !matches!(emotion.as_str(), "happy" | "sad" | "shocked" | "celebrate" | "shy") {
+        eprintln!("Unknown emotion: {} (expected happy, sad, shocked, celebrate, or shy)", emotion);
+        std::process::exit(1);
+    }
+    let Some(message) = get_arg(args, "--message") else {
+        eprintln!("Usage: claude-status-pet react --emotion <happy|sad|shocked|celebrate|shy> --message <text> --session <id> [--speak]");
+        std::process::exit(1);
+    };
+    let Some(session_id) = get_arg(args, "--session") else {
+        eprintln!("Usage: claude-status-pet react --emotion <happy|sad|shocked|celebrate|shy> --message <text> --session <id> [--speak]");
+        std::process::exit(1);
+    };
+    if !is_safe_session_id(&session_id) {
+        eprintln!("Invalid session ID");
+        std::process::exit(1);
+    }
+
+    let ts = timestamp_millis();
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let id = format!("{}-{:x}-{:x}", ts, std::process::id(), suffix);
+    let reaction = serde_json::json!({
+        "id": id,
+        "emotion": emotion,
+        "message": message,
+        "speak": args.iter().any(|arg| arg == "--speak"),
+        "ts": ts,
+        "ttl_ms": 10000u64,
+    });
+    let reaction_file = pet_dir.join(format!("reaction-{}.json", session_id));
+    let content = reaction.to_string();
+    if let Err(e) = write_json_atomic(&reaction_file, content.as_bytes()) {
+        debug_log(&log_path, &format!("reaction write failed: {}", e));
+        eprintln!("Failed to write reaction: {}", e);
+        std::process::exit(1);
+    }
+
+    println!("{}", reaction_file.to_string_lossy());
+}
+
+fn timestamp_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn cleanup_stale_status(pet_dir: &PathBuf) {
@@ -861,7 +988,11 @@ fn timestamp() -> String {
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Subcommand dispatch: write-status runs without GUI
+    // Subcommand dispatch: CLI commands run without GUI.
+    if args.iter().any(|a| a == "react") {
+        cmd_react(&args);
+        std::process::exit(0);
+    }
     if args.iter().any(|a| a == "write-status") {
         cmd_write_status(&args);
         std::process::exit(0); // Force exit — don't wait for stdin reader thread
@@ -991,8 +1122,9 @@ pub fn run() {
                     }
                 });
             } else {
-                // Explicit session mode: watch status file directly
+                // Explicit session mode: watch the status and reaction files directly
                 let watch_path = initial_status_path.clone();
+                let reaction_path = default_pet_dir().join(format!("reaction-{}.json", initial_session_id));
                 let log_path = initial_status_path.clone();
                 std::thread::spawn(move || {
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -1026,22 +1158,27 @@ pub fn run() {
 
                 for event in rx {
                     if let Ok(event) = event {
-                        let is_our_file = event.paths.iter().any(|p| *p == watch_path);
-                        if !is_our_file {
+                        let is_status_file = event.paths.iter().any(|p| *p == watch_path);
+                        let is_reaction_file = event.paths.iter().any(|p| *p == reaction_path);
+                        if !is_status_file && !is_reaction_file {
                             continue;
                         }
                         debug_log(&log_path, &format!("Event: {:?}, paths: {:?}", event.kind, event.paths));
                         match event.kind {
                             EventKind::Modify(_) | EventKind::Create(_) => {
                                 std::thread::sleep(std::time::Duration::from_millis(50));
-                                if let Some(status) = read_status(&watch_path) {
+                                if is_reaction_file {
+                                    if let Some(reaction) = read_reaction(&reaction_path, &log_path) {
+                                        let _ = handle.emit("reaction-event", reaction);
+                                    }
+                                } else if let Some(status) = read_status(&watch_path) {
                                     debug_log(&log_path, &format!("Emit: state={}, detail={}", status.state, status.detail));
                                     let _ = handle.emit("status-update", status);
                                 } else {
                                     debug_log(&log_path, "Read failed after Modify/Create (file may be mid-write)");
                                 }
                             }
-                            EventKind::Remove(_) => {
+                            EventKind::Remove(_) if is_status_file => {
                                 debug_log(&log_path, "Remove detected, waiting 300ms to confirm deletion...");
                                 std::thread::sleep(std::time::Duration::from_millis(300));
                                 if watch_path.exists() {

@@ -55,7 +55,9 @@ Create `<pack-dir>/character.json`:
 ```json
 {
   "name": "My Character",
+  "version": 2,
   "type": "gif",
+  "auto_return_seconds": 90,
   "appearance": {
     "motion": "full",
     "uiPreset": "classic",
@@ -63,6 +65,22 @@ Create `<pack-dir>/character.json`:
     "bubble": "all",
     "stateLabel": "always",
     "identity": "always"
+  },
+  "transitions": {
+    "idle->editing": {
+      "frames": ["<pack-name>/idle_to_edit.gif"],
+      "duration_ms": 1000
+    },
+    "editing->idle": {
+      "frames": ["<pack-name>/edit_to_idle.gif"],
+      "duration_ms": 800
+    }
+  },
+  "idle_variations": {
+    "idle": [
+      "<pack-name>/idle_blink.gif",
+      "<pack-name>/idle_stretch.gif"
+    ]
   },
   "states": {
     "idle":       ["<pack-name>/idle.gif"],
@@ -81,10 +99,64 @@ Create `<pack-dir>/character.json`:
 ```
 
 **Important:**
+- `version`: Optional schema version number (`2` for transition / variation / auto-return support). Legacy v1 configs without `version` continue to work seamlessly.
 - `type` must be `"webp"`, `"gif"`, `"png"`, or `"svg"`
 - Image paths are relative to the `assets/` or `characters/` parent directory, prefixed with the pack name
 - Each state value is an **array** of paths (for random variety)
 - `name` is what appears in the right-click menu
+
+### Schema Version 2 Features
+
+Version 2 introduces transitions, idle variations, and auto-return decay:
+
+#### 1. Transitions (`transitions`)
+Defines one-shot animation clips played when transitioning between specific states (e.g. `idle->editing`):
+```json
+"transitions": {
+  "idle->editing": {
+    "frames": ["<pack-name>/idle_to_edit.gif"],
+    "duration_ms": 1000
+  },
+  "searching->idle": {
+    "frames": ["<pack-name>/found.png"],
+    "duration_ms": 800
+  }
+}
+```
+- **Key format**: `"fromState->toState"`.
+- **`frames`**: Array of image paths (or a single string path). If multiple frames are provided, they are stepped through sequentially across the total duration.
+- **`duration_ms`**: Optional playback duration in milliseconds (default: `1000`).
+- **Silent degradation**: If a transition image fails to load or is missing, the player silently falls back to the destination state loop with the standard ~150ms fade without showing an error in the UI.
+- **Unconfigured transitions**: State pairs without a configured transition seamlessly transition using the standard ~150ms fade.
+
+#### 2. Auto-Return Decay (`auto_return_seconds`)
+Controls how long the pet remains in an active non-alert state without receiving new status updates before decaying back to the `idle` animation loop:
+```json
+"auto_return_seconds": 90
+```
+- **Type**: Number (seconds). Default: `90`.
+- **Behavior**: If no new `status-update` event is received within this duration while in a non-alert state (e.g. `thinking`, `reading`, `editing`, `searching`, `running`, `delegating`, `offline`), the visual animation automatically plays the transition to `idle` (or returns directly to `idle` loop).
+- **Alert preservation**: Alert states (`error`, `waiting`) **never** decay and will stay active until resolved.
+- **State label**: The state label and status text always display the true business state from the assistant.
+
+#### 3. Idle Variations (`idle_variations`)
+Provides random one-shot animations while resting in `idle`:
+```json
+"idle_variations": {
+  "idle": [
+    "<pack-name>/blink.gif",
+    "<pack-name>/look_around.gif"
+  ]
+}
+```
+- **Trigger**: When the pet has remained in `idle` continuously for 30 seconds without new events, a variation is randomly selected and played as a one-shot (~2s).
+- **Completion**: Once finished, the pet returns to the base `idle` loop and resets the 30-second variation timer.
+- **Silent degradation**: If a variation asset fails to load, it is silently skipped without interrupting the idle state.
+
+#### 4. Priority & Interruption Rules
+- **Alerts preempt everything**: Incoming alert states (`error`, `waiting`) immediately abort any running transition or idle variation and instantly switch to the alert state loop.
+- **Status Text & State Label**: Reflect the true business state immediately, regardless of ongoing transition animations.
+- **Backward Compatibility**: Packs created for v1 (omitting `transitions`, `idle_variations`, or `auto_return_seconds`) continue to function identically to legacy behavior. All new fields are completely optional.
 
 ### Optional appearance recommendations
 
@@ -98,7 +170,7 @@ win over the pack, and omitted fields use the legacy `Full + Classic` defaults.
 | `uiPreset` | `minimal`, `classic`, `debug` | Chrome treatment around the art. |
 | `artScale` | `0.7`–`1.5` | Art-only scale; it does not change window, bubble, or text scale. |
 | `bubble` | `off`, `alerts`, `all` | Status-detail bubble visibility. |
-| `stateLabel` | `off`, `alerts`, `always` | State-text visibility. |
+| `stateLabel` | `off`, `minimal`, `alerts`, `always` | State visibility: `off` (hidden), `minimal` (compact diamond gem with hover tooltip), `alerts` (text label on error/waiting), `always` (text label always visible). |
 | `identity` | `hidden`, `hover`, `always` | Session name visibility. |
 
 For authored animated video packs, use `motion: "intrinsic"`, `bubble: "off"`,
