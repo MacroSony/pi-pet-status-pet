@@ -55,6 +55,9 @@ html, body {
   pointer-events: none;
 }
 
+/* A disabled/inapplicable bubble must not reserve vertical chrome. */
+#pet-container[data-bubble-visible="false"] #speech-bubble { display: none; }
+
 #status-text {
   font-size: 13px;
   font-weight: 500;
@@ -65,6 +68,15 @@ html, body {
   -webkit-box-orient: vertical;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Art stage keeps hover identity out of normal layout. */
+#art-stage {
+  position: relative;
+  width: 140px;
+  height: 140px;
+  flex: 0 0 auto;
+  margin-bottom: 26px;
 }
 
 /* Ferris image */
@@ -88,27 +100,38 @@ html, body {
   transition: opacity 0.2s ease;
 }
 
-/* Session name */
+/* Session name: an absolute HUD, never a layout element. */
 #session-name {
   font-size: 12px;
-  font-weight: 400;
+  font-weight: 500;
   line-height: 1;
   color: rgba(255, 255, 255, 0.95);
   background: var(--accent, rgba(224, 108, 60, 0.8));
   padding: 5px 10px;
   border-radius: 6px;
-  margin-top: 2px;
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  top: calc(100% + 2px);
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: center;
-  transition: opacity 0.3s;
+  transform: translate(-50%, -3px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
-#session-name:empty {
-  display: none;
+#session-name:empty { display: none; }
+#pet-container[data-identity="always"] #session-name,
+#pet-container[data-identity="pinned"] #session-name,
+#pet-container[data-identity="hover"]:hover #session-name {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
+#pet-container[data-identity="hidden"] #session-name { display: none; }
 
 /* State label */
 #state-label {
@@ -123,6 +146,24 @@ html, body {
 }
 
 /* ── Animations per state ── */
+/* Intrinsic is intended for animated WebP/GIF packs: the asset owns motion. */
+.motion-intrinsic #ferris-wrapper,
+.motion-intrinsic #ascii-art { animation: none !important; }
+
+/* Subtle retains a small life signal without fighting authored animation. */
+@keyframes subtle-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+.motion-subtle.anim-idle #ferris-wrapper, .motion-subtle.anim-idle #ascii-art,
+.motion-subtle.anim-reading #ferris-wrapper, .motion-subtle.anim-reading #ascii-art,
+.motion-subtle.anim-thinking #ferris-wrapper, .motion-subtle.anim-thinking #ascii-art,
+.motion-subtle.anim-searching #ferris-wrapper, .motion-subtle.anim-searching #ascii-art,
+.motion-subtle.anim-editing #ferris-wrapper, .motion-subtle.anim-editing #ascii-art,
+.motion-subtle.anim-running #ferris-wrapper, .motion-subtle.anim-running #ascii-art,
+.motion-subtle.anim-delegating #ferris-wrapper, .motion-subtle.anim-delegating #ascii-art,
+.motion-subtle.anim-waiting #ferris-wrapper, .motion-subtle.anim-waiting #ascii-art,
+.motion-subtle.anim-offline #ferris-wrapper, .motion-subtle.anim-offline #ascii-art {
+  animation: subtle-float 3s ease-in-out infinite;
+}
+.motion-subtle.anim-error #ferris-wrapper, .motion-subtle.anim-error #ascii-art { animation: subtle-float 0.7s ease-in-out 2; }
 
 /* Idle: gentle floating */
 @keyframes float {
@@ -407,4 +448,35 @@ html, body {
 .anim-waiting #state-label { color: #e67e22; }
 .anim-error #state-label { color: #e74c3c; }
 .anim-offline #state-label { color: #95a5a6; }
+
+/* Presentation presets. Classic is deliberately the legacy appearance. */
+.preset-minimal #speech-bubble {
+  background: rgba(15, 23, 42, 0.88);
+  border-color: rgba(148, 163, 184, 0.42);
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.24);
+}
+.preset-minimal #speech-bubble::after { border-top-color: rgba(148, 163, 184, 0.42); }
+.preset-minimal #status-text { color: #e2e8f0; }
+.preset-minimal #session-name {
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  border-radius: 9px;
+}
+.preset-minimal #state-label { color: #94a3b8; text-shadow: none; font-size: 10px; }
+
+.preset-debug #session-name { background: rgba(76, 29, 149, 0.92); }
+.preset-debug #state-label { color: #fbbf24; }
+.preset-debug #art-stage::before {
+  content: 'DEBUG'; position: absolute; left: 50%; top: -13px; transform: translateX(-50%);
+  color: #fbbf24; font: 700 9px/1 monospace; letter-spacing: 1px;
+}
+
+/* These must come after legacy state rules so authored WebP/GIF animation wins. */
+.motion-intrinsic #ferris-wrapper,
+.motion-intrinsic #ascii-art { animation: none !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  #ferris-wrapper, #ascii-art, #speech-bubble, #session-name { animation: none !important; transition-duration: 0.01ms !important; }
+}
 

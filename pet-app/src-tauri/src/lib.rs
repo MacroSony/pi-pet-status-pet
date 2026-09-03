@@ -358,6 +358,11 @@ fn download_dlc_blocking(dir: &PathBuf, dlc_name: &str) -> Result<bool, String> 
     if let Some(ver) = config.get("version") {
         character["version"] = ver.clone();
     }
+    // `appearance` is optional presentation metadata. Keep it when installing
+    // DLCs, while retaining the deliberately small, trusted character schema.
+    if let Some(appearance) = config.get("appearance") {
+        character["appearance"] = appearance.clone();
+    }
     fs::write(dlc_dir.join("character.json"), serde_json::to_string_pretty(&character).unwrap())
         .map_err(|e| format!("Failed to write character.json: {}", e))?;
 

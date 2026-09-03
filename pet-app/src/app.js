@@ -5,6 +5,7 @@ const statusText = document.getElementById('status-text');
 const stateLabel = document.getElementById('state-label');
 const sessionNameEl = document.getElementById('session-name');
 const container = document.getElementById('pet-container');
+const artStage = document.getElementById('art-stage');
 const imgWrapper = document.getElementById('ferris-wrapper');
 const imgEl = document.getElementById('ferris-img');
 const asciiPre = document.getElementById('ascii-art');
@@ -134,8 +135,22 @@ const ASCII_SPECIES = {
   },
 };
 
-// GIF character maps loaded from character.json files (populated at init)
+// GIF/WebP character maps loaded from character.json files (populated at init).
+// Keep the complete config as well: `appearance` is optional pack metadata.
 const GIF_MODES = {};
+const CHARACTER_CONFIGS = {};
+const DEFAULT_APPEARANCE = Object.freeze({
+  motion: 'full', uiPreset: 'classic', artScale: 1,
+  bubble: 'all', stateLabel: 'always', identity: 'always',
+});
+const APPEARANCE_VALUES = Object.freeze({
+  motion: ['intrinsic', 'subtle', 'full'],
+  uiPreset: ['minimal', 'classic', 'debug'],
+  artScale: null,
+  bubble: ['off', 'alerts', 'all'],
+  stateLabel: ['off', 'alerts', 'always'],
+  identity: ['hidden', 'hover', 'always'],
+});
 
 // Ferris SVG map loaded from character.json (populated at init, fallback to hardcoded)
 let FERRIS_SVG_MAP = {
@@ -163,6 +178,9 @@ let petSessionBg = localStorage.getItem('petSessionBg') || '';
 let petFontSize = parseInt(localStorage.getItem('petFontSize') || '16');
 let petScale = parseFloat(localStorage.getItem('petScale') || '1');
 let currentState = 'idle';
+let activeCharacterConfig = null;
+let latestStatus = null;
+let identityPinned = localStorage.getItem('petIdentityPinned') === 'true';
 let currentImgSrc = '';
 let bubbleTimeout = null;
 let asciiFrame = 0;
@@ -181,6 +199,58 @@ function pickRandom(arr) {
 
 function startDrag() {
   if (window.__TAURI__) window.__TAURI__.window.getCurrentWindow().startDragging();
+}
+
+function registerCharacterConfig(id, config) {
+  if (!config || !config.states || typeof config.states !== 'object') return;
+  CHARACTER_CONFIGS[id] = config;
+  GIF_MODES[id] = config.states;
+}
+
+function activeAppearance() {
+  const suggested = (activeCharacterConfig && activeCharacterConfig.appearance) || {};
+  const result = {};
+  for (const [key, fallback] of Object.entries(DEFAULT_APPEARANCE)) {
+    const saved = localStorage.getItem(`petAppearance.${key}`);
+    let value = saved === null ? suggested[key] : saved;
+    if (key === 'artScale') {
+      value = Number(value);
+      result[key] = Number.isFinite(value) && value >= 0.7 && value <= 1.5 ? value : fallback;
+    } else {
+      result[key] = APPEARANCE_VALUES[key].includes(value) ? value : fallback;
+    }
+  }
+  return result;
+}
+
+function setAppearance(key, value) {
+  localStorage.setItem(`petAppearance.${key}`, String(value));
+  applyConfig();
+}
+
+function clearAppearanceOverrides() {
+  for (const key of Object.keys(DEFAULT_APPEARANCE)) localStorage.removeItem(`petAppearance.${key}`);
+}
+
+function compactSessionName(value) {
+  const parts = String(value || '').split('/').map(s => s.trim()).filter(Boolean);
+  const short = parts.length >= 2 ? parts.slice(-2).join(' · ') : parts[0] || '';
+  return short.length > 42 ? short.slice(0, 41) + '…' : short;
+}
+
+function setVisualAnimation(name) {
+  const appearance = activeAppearance();
+  container.className = `motion-${appearance.motion} preset-${appearance.uiPreset} anim-${name}`;
+}
+
+function shouldShowBubble(state) {
+  const policy = activeAppearance().bubble;
+  return policy === 'all' || (policy === 'alerts' && (state === 'waiting' || state === 'error'));
+}
+
+function shouldShowStateLabel(state) {
+  const policy = activeAppearance().stateLabel;
+  return policy === 'always' || (policy === 'alerts' && (state === 'waiting' || state === 'error'));
 }
 
 // ── Apply visual config ──
@@ -204,13 +274,24 @@ function applyConfig() {
   container.style.width = Math.round(200 * petScale) + 'px';
   container.style.height = Math.round(240 * petScale) + 'px';
 
-  // Scale inner elements
-  imgWrapper.style.width = Math.round(140 * petScale) + 'px';
-  imgWrapper.style.height = Math.round(140 * petScale) + 'px';
+  // Global scale controls the window/chrome. Art scale is deliberately independent.
+  const appearance = activeAppearance();
+  const artSize = Math.round(140 * appearance.artScale * petScale);
+  artStage.style.width = artSize + 'px';
+  artStage.style.height = artSize + 'px';
+  imgWrapper.style.width = artSize + 'px';
+  imgWrapper.style.height = artSize + 'px';
+  asciiPre.style.width = artSize + 'px';
   statusText.style.fontSize = Math.round(13 * petScale) + 'px';
   sessionNameEl.style.fontSize = Math.round(12 * petScale) + 'px';
   stateLabel.style.fontSize = Math.round(12 * petScale) + 'px';
   bubble.style.maxWidth = Math.round(180 * petScale) + 'px';
+  container.dataset.identity = identityPinned ? 'pinned' : appearance.identity;
+  container.dataset.bubble = appearance.bubble;
+  container.dataset.bubbleVisible = shouldShowBubble(currentState) ? 'true' : 'false';
+  container.dataset.stateLabel = appearance.stateLabel;
+  setVisualAnimation(currentState);
+  stateLabel.hidden = !shouldShowStateLabel(currentState);
 
   // Resize window to match
   if (window.__TAURI__) {
@@ -300,6 +381,7 @@ function startAsciiAnimation(frames) {
 // ── Main update ──
 
 function updateStatus(status) {
+  latestStatus = status;
   const state = status.state || 'idle';
   const detail = status.detail || '';
   const sessionName = status.session_name || '';
@@ -309,7 +391,10 @@ function updateStatus(status) {
     return;
   }
 
-  if (sessionName) sessionNameEl.textContent = sessionName;
+  if (sessionName) {
+    sessionNameEl.textContent = compactSessionName(sessionName);
+    sessionNameEl.title = sessionName;
+  }
 
   if (mode === 'ferris') {
     showImage();
@@ -329,15 +414,20 @@ function updateStatus(status) {
   }
 
   if (state !== currentState) {
-    container.className = 'anim-appear';
-    setTimeout(() => { container.className = `anim-${state}`; }, 400);
     currentState = state;
+    setVisualAnimation('appear');
+    setTimeout(() => { if (currentState === state) setVisualAnimation(state); }, 400);
   }
 
   stateLabel.textContent = state;
+  stateLabel.hidden = !shouldShowStateLabel(state);
 
-  // Speech bubble — always visible for active states, 30s timeout for idle/offline
-  if (detail && state !== 'offline') {
+  // Bubble policy can be off, alerts-only, or legacy all-states.
+  container.dataset.bubbleVisible = (shouldShowBubble(state) && (!!detail || state === 'offline')) ? 'true' : 'false';
+  if (!shouldShowBubble(state)) {
+    clearTimeout(bubbleTimeout);
+    bubble.classList.add('hidden');
+  } else if (detail && state !== 'offline') {
     if (statusText.textContent !== detail) {
       bubble.style.transition = 'none';
       bubble.style.transform = 'scale(0.95)';
@@ -352,7 +442,7 @@ function updateStatus(status) {
     if (state === 'idle') {
       bubbleTimeout = setTimeout(() => { bubble.classList.add('hidden'); }, 30000);
     }
-  } else if (state === 'offline') {
+  } else if (state === 'offline' && shouldShowBubble(state)) {
     statusText.textContent = 'Zzz...';
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
@@ -432,6 +522,25 @@ function addSliderRow(parent, label, currentVal, min, max, step, onchange, unit)
   parent.appendChild(row);
 }
 
+function addChoiceRow(parent, label, value, choices, onchange) {
+  const row = document.createElement('label');
+  row.className = 'menu-config-row';
+  const lbl = document.createElement('span');
+  lbl.className = 'menu-config-label';
+  lbl.textContent = label;
+  const select = document.createElement('select');
+  select.className = 'menu-select-input';
+  for (const [optionValue, optionLabel] of choices) {
+    const option = document.createElement('option');
+    option.value = optionValue; option.textContent = optionLabel;
+    option.selected = optionValue === value;
+    select.appendChild(option);
+  }
+  select.onchange = () => onchange(select.value);
+  row.append(lbl, select);
+  parent.appendChild(row);
+}
+
 function buildMenu() {
   charMenu.innerHTML = '';
   if (menuPage === 'config') { buildConfigPage(); return; }
@@ -500,7 +609,16 @@ function buildAsciiPage() {
 }
 
 function buildConfigPage() {
+  const appearance = activeAppearance();
   addMenuItem(charMenu, '← Back', () => { menuPage = 'main'; buildMenu(); });
+  addDivider(charMenu);
+  addChoiceRow(charMenu, 'Motion', appearance.motion, [['intrinsic', 'Intrinsic'], ['subtle', 'Subtle'], ['full', 'Full']], (v) => setAppearance('motion', v));
+  addChoiceRow(charMenu, 'UI', appearance.uiPreset, [['minimal', 'Minimal'], ['classic', 'Classic'], ['debug', 'Debug']], (v) => setAppearance('uiPreset', v));
+  addSliderRow(charMenu, 'Art size', appearance.artScale, 0.7, 1.5, 0.05, (v) => setAppearance('artScale', v), '%');
+  addChoiceRow(charMenu, 'Bubble', appearance.bubble, [['off', 'Off'], ['alerts', 'Alerts'], ['all', 'All']], (v) => setAppearance('bubble', v));
+  addChoiceRow(charMenu, 'State', appearance.stateLabel, [['off', 'Off'], ['alerts', 'Alerts'], ['always', 'Always']], (v) => setAppearance('stateLabel', v));
+  addChoiceRow(charMenu, 'Identity', appearance.identity, [['hidden', 'Hidden'], ['hover', 'Hover'], ['always', 'Always']], (v) => { identityPinned = false; localStorage.removeItem('petIdentityPinned'); setAppearance('identity', v); });
+  if (sessionNameEl.textContent) addMenuItem(charMenu, identityPinned ? 'Unpin identity' : 'Pin identity', () => { identityPinned = !identityPinned; localStorage.setItem('petIdentityPinned', String(identityPinned)); applyConfig(); buildConfigPage(); });
   addDivider(charMenu);
   addSliderRow(charMenu, 'Scale', petScale, 1, 2, 0.1, (v) => { petScale = v; saveConfig('petScale', String(v)); }, '%');
   addColorRow(charMenu, 'Text', petTextColor, '#ffffff', (v) => { petTextColor = v; saveConfig('petTextColor', v); });
@@ -511,7 +629,7 @@ function buildConfigPage() {
   addMenuItem(charMenu, 'Update Assets', async () => {
     closeMenu();
     stateLabel.textContent = 'downloading';
-    container.className = 'anim-thinking';
+    setVisualAnimation('thinking');
     statusText.textContent = 'Updating assets...';
     bubble.classList.remove('hidden');
     try {
@@ -524,18 +642,18 @@ function buildConfigPage() {
         }
       } catch(e) {}
       statusText.textContent = 'Assets updated!';
-      container.className = '';
+      setVisualAnimation('idle');
       stateLabel.textContent = 'idle';
       clearTimeout(bubbleTimeout);
       bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 5000);
     } catch(e) {
       statusText.textContent = 'Update failed: ' + (e || 'unknown error');
-      container.className = 'anim-error';
+      setVisualAnimation('error');
       stateLabel.textContent = 'error';
       clearTimeout(bubbleTimeout);
       bubbleTimeout = setTimeout(() => {
         bubble.classList.add('hidden');
-        container.className = '';
+        setVisualAnimation('idle');
         stateLabel.textContent = 'idle';
       }, 8000);
     }
@@ -543,6 +661,7 @@ function buildConfigPage() {
   addDivider(charMenu);
   addMenuItem(charMenu, 'Reset Default', () => {
     petScale = 1; petTextColor = ''; petSessionBg = ''; petFillColor = ''; petBgColor = '';
+    identityPinned = false; clearAppearanceOverrides(); localStorage.removeItem('petIdentityPinned');
     localStorage.removeItem('petScale'); localStorage.removeItem('petTextColor');
     localStorage.removeItem('petSessionBg'); localStorage.removeItem('petFillColor');
     localStorage.removeItem('petBgColor');
@@ -577,7 +696,7 @@ async function downloadAndSelectDlc(dlcName) {
 
   // Show downloading state with animation
   stateLabel.textContent = 'downloading';
-  container.className = 'anim-thinking';
+  setVisualAnimation('thinking');
   statusText.textContent = 'Downloading ' + dlcName + '...';
   bubble.classList.remove('hidden');
 
@@ -591,7 +710,7 @@ async function downloadAndSelectDlc(dlcName) {
       const jsonStr = await window.__TAURI__.core.invoke('load_text_asset', { path: dlcName + '/character.json' });
       if (jsonStr) {
         const config = JSON.parse(jsonStr);
-        GIF_MODES[dlcName] = config.states;
+        registerCharacterConfig(dlcName, config);
       }
     } catch(e) {}
     await selectChar(dlcName);
@@ -600,13 +719,14 @@ async function downloadAndSelectDlc(dlcName) {
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 5000);
-    container.className = 'anim-error';
+    setVisualAnimation('error');
     stateLabel.textContent = 'error';
   }
 }
 
 async function selectChar(newMode) {
   mode = newMode;
+  activeCharacterConfig = CHARACTER_CONFIGS[mode] || null;
   localStorage.setItem('petMode', mode);
   closeMenu();
   currentImgSrc = '';
@@ -727,7 +847,7 @@ async function initAssets() {
       if (dlcs.length === 0) {
         // Assets dir exists but has no DLC configs — need to download
         stateLabel.textContent = 'downloading';
-        container.className = 'anim-thinking';
+        setVisualAnimation('thinking');
         statusText.textContent = 'Downloading assets...';
         bubble.classList.remove('hidden');
         try {
@@ -737,12 +857,12 @@ async function initAssets() {
           bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 3000);
         } catch(e) {
           statusText.textContent = 'Assets download failed: ' + (e || 'unknown error');
-          container.className = 'anim-error';
+          setVisualAnimation('error');
           stateLabel.textContent = 'error';
           clearTimeout(bubbleTimeout);
           bubbleTimeout = setTimeout(() => {
             bubble.classList.add('hidden');
-            container.className = '';
+            setVisualAnimation('idle');
             stateLabel.textContent = 'idle';
           }, 8000);
         }
@@ -796,6 +916,7 @@ async function preloadAssets() {
     if (resp.ok) {
       const config = await resp.json();
       FERRIS_SVG_MAP = config.states;
+      CHARACTER_CONFIGS.ferris = config;
     }
   } catch(e) {}
 
@@ -810,7 +931,7 @@ async function preloadAssets() {
           try {
             const jsonStr = await window.__TAURI__.core.invoke('load_text_asset', { path: dlc.id + '/character.json' });
             if (jsonStr) {
-              GIF_MODES[dlc.id] = JSON.parse(jsonStr).states;
+              registerCharacterConfig(dlc.id, JSON.parse(jsonStr));
             }
           } catch(e) {}
         }
@@ -826,7 +947,7 @@ async function preloadAssets() {
           try {
             const jsonStr = await window.__TAURI__.core.invoke('load_text_asset', { path: pack.id + '/character.json' });
             if (jsonStr) {
-              GIF_MODES[pack.id] = JSON.parse(jsonStr).states;
+              registerCharacterConfig(pack.id, JSON.parse(jsonStr));
             }
           } catch(e) {}
         }
@@ -846,7 +967,7 @@ async function preloadAssets() {
       try { hasExternalAssets = !!(await window.__TAURI__.core.invoke('get_assets_dir')); } catch(e) {}
       const jsonStr = await window.__TAURI__.core.invoke('load_text_asset', { path: mode + '/character.json' });
       if (jsonStr) {
-        GIF_MODES[mode] = JSON.parse(jsonStr).states;
+        registerCharacterConfig(mode, JSON.parse(jsonStr));
       } else {
         throw new Error('character.json not found after download');
       }
@@ -869,6 +990,9 @@ async function preloadAssets() {
     await preloadAssets();
   }
 
+  activeCharacterConfig = CHARACTER_CONFIGS[mode] || null;
   applyConfig();
-  updateStatus({ state: 'idle', detail: '' });
+  // A status watcher can resolve while pack discovery is still async. Preserve
+  // that real state rather than flashing/locking the renderer to idle.
+  updateStatus(latestStatus || { state: 'idle', detail: '' });
 })();

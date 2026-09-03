@@ -56,6 +56,14 @@ Create `<pack-dir>/character.json`:
 {
   "name": "My Character",
   "type": "gif",
+  "appearance": {
+    "motion": "full",
+    "uiPreset": "classic",
+    "artScale": 1.0,
+    "bubble": "all",
+    "stateLabel": "always",
+    "identity": "always"
+  },
   "states": {
     "idle":       ["<pack-name>/idle.gif"],
     "thinking":   ["<pack-name>/think.gif"],
@@ -77,6 +85,24 @@ Create `<pack-dir>/character.json`:
 - Image paths are relative to the `assets/` or `characters/` parent directory, prefixed with the pack name
 - Each state value is an **array** of paths (for random variety)
 - `name` is what appears in the right-click menu
+
+### Optional appearance recommendations
+
+`appearance` is optional metadata, so existing packs are fully compatible. It
+provides **recommendations**, not locked behaviour: a user's settings always
+win over the pack, and omitted fields use the legacy `Full + Classic` defaults.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `motion` | `intrinsic`, `subtle`, `full` | `intrinsic` disables renderer transforms so an animated WebP/GIF owns its movement. |
+| `uiPreset` | `minimal`, `classic`, `debug` | Chrome treatment around the art. |
+| `artScale` | `0.7`–`1.5` | Art-only scale; it does not change window, bubble, or text scale. |
+| `bubble` | `off`, `alerts`, `all` | Status-detail bubble visibility. |
+| `stateLabel` | `off`, `alerts`, `always` | State-text visibility. |
+| `identity` | `hidden`, `hover`, `always` | Session name visibility. |
+
+For authored animated video packs, use `motion: "intrinsic"`, `bubble: "off"`,
+`stateLabel: "off"`, and normally `identity: "hover"`.
 
 ## Step 4: Verify
 
