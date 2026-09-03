@@ -143,7 +143,7 @@ const GIF_MODES = {};
 const CHARACTER_CONFIGS = {};
 const DEFAULT_APPEARANCE = Object.freeze({
   motion: 'full', uiPreset: 'classic', artScale: 1,
-  bubble: 'all', stateLabel: 'always', identity: 'always',
+  bubble: 'all', stateLabel: 'always', identity: 'always', poke: 'on',
 });
 const APPEARANCE_VALUES = Object.freeze({
   motion: ['intrinsic', 'subtle', 'full'],
@@ -152,6 +152,7 @@ const APPEARANCE_VALUES = Object.freeze({
   bubble: ['off', 'alerts', 'all'],
   stateLabel: ['off', 'minimal', 'alerts', 'always'],
   identity: ['hidden', 'hover', 'always'],
+  poke: ['on', 'off'],
 });
 
 // Ferris SVG map loaded from character.json (populated at init, fallback to hardcoded)
@@ -283,6 +284,19 @@ let idleVariationTimer = null; // Timer for idle variation triggers
 let statusUpdateVersion = 0;
 let reactionRequestVersion = 0;
 const consumedReactionIds = new Set();
+
+const POKE_COOLDOWN_MS = 4000;
+const POKE_HOVER_MS = 3000;
+const POKE_CLICK_HOLD_MS = 300;
+const POKE_CLICK_DISTANCE = 5;
+let pokeCooldownUntil = 0;
+let pokeHoverTimer = null;
+let pokeHoverTriggered = false;
+let pokePointer = null;
+let pokeClickAllowed = false;
+let pokeGestureInvalid = false;
+let pokeClickTimer = null;
+let lastPokeDoubleClickAt = -Infinity;
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -837,6 +851,131 @@ function handleReactionEvent(reaction) {
   playReaction(reaction, requestVersion);
 }
 
+// Poke reactions use the same reaction asset lookup and REACTION one-shot slot
+// as file-backed reaction events. The cooldown is for local user interaction
+// only; external reaction events retain their existing behavior.
+function triggerPoke(emotion) {
+  const now = Date.now();
+  if (activeAppearance().poke !== 'on' || ALERT_STATES.has(currentBusinessState)) return false;
+  if (now < pokeCooldownUntil) return false;
+
+  pokeCooldownUntil = now + POKE_COOLDOWN_MS;
+  const requestVersion = ++reactionRequestVersion;
+  playReaction({
+    emotion,
+    ts: now,
+    ttl_ms: 2500,
+  }, requestVersion);
+  return true;
+}
+
+function isPokeTarget(target) {
+  if (!target || !artStage.contains(target)) return false;
+  return !target.closest('#state-gem, #speech-bubble, #char-menu, #menu-backdrop, #session-name');
+}
+
+function markPokePointerMoved(event) {
+  if (!pokePointer) return;
+  const dx = event.clientX - pokePointer.x;
+  const dy = event.clientY - pokePointer.y;
+  if (Math.hypot(dx, dy) > POKE_CLICK_DISTANCE) pokePointer.moved = true;
+}
+
+function beginPokePointer(event) {
+  if (event.button !== undefined && event.button !== 0) return;
+  if (!isPokeTarget(event.target) || pokePointer) return;
+
+  const startedAt = Date.now();
+  pokePointer = {
+    x: event.clientX,
+    y: event.clientY,
+    startedAt,
+    moved: false,
+    holdTimer: setTimeout(() => {
+      if (pokePointer && pokePointer.startedAt === startedAt) pokePointer.held = true;
+    }, POKE_CLICK_HOLD_MS),
+  };
+  pokeClickAllowed = false;
+  pokeGestureInvalid = false;
+}
+
+function endPokePointer(event) {
+  if (!pokePointer) return;
+  markPokePointerMoved(event);
+  const pointer = pokePointer;
+  clearTimeout(pointer.holdTimer);
+  pokePointer = null;
+  // Releasing outside the art stage is not a click, even if the pointer did
+  // not move far enough to be classified as a drag.
+  pokeClickAllowed = isPokeTarget(event.target)
+    && !pointer.moved
+    && !pointer.held
+    && Date.now() - pointer.startedAt <= POKE_CLICK_HOLD_MS;
+  pokeGestureInvalid = !pokeClickAllowed;
+}
+
+function cancelPokePointer() {
+  if (pokePointer) clearTimeout(pokePointer.holdTimer);
+  pokePointer = null;
+  pokeClickAllowed = false;
+  pokeGestureInvalid = true;
+}
+
+function handlePokeClick(event) {
+  if (!isPokeTarget(event.target) || !pokeClickAllowed) return;
+  pokeClickAllowed = false;
+
+  if (event.detail >= 2) {
+    clearTimeout(pokeClickTimer);
+    pokeClickTimer = null;
+    lastPokeDoubleClickAt = Date.now();
+    triggerPoke('shy');
+    return;
+  }
+
+  // Delay the single-click action long enough for a second click to identify
+  // a double click. The second click (detail >= 2) cancels this timer.
+  clearTimeout(pokeClickTimer);
+  pokeClickTimer = setTimeout(() => {
+    pokeClickTimer = null;
+    triggerPoke('happy');
+  }, 400);
+}
+
+function handlePokeDoubleClick(event) {
+  if (!isPokeTarget(event.target)) return;
+  // A drag must not be promoted to a double click by a browser/event source.
+  if (pokeGestureInvalid) {
+    pokeGestureInvalid = false;
+    return;
+  }
+  // Chromium normally reports detail=2 on the second click before dblclick;
+  // avoid playing shy twice while retaining support for a direct dblclick.
+  if (Date.now() - lastPokeDoubleClickAt < 1000) return;
+  clearTimeout(pokeClickTimer);
+  pokeClickTimer = null;
+  lastPokeDoubleClickAt = Date.now();
+  triggerPoke('shy');
+}
+
+function startPokeHover() {
+  clearTimeout(pokeHoverTimer);
+  pokeHoverTriggered = false;
+  pokeHoverTimer = setTimeout(() => {
+    pokeHoverTimer = null;
+    if (!pokeHoverTriggered) {
+      pokeHoverTriggered = true;
+      triggerPoke('shocked');
+    }
+  }, POKE_HOVER_MS);
+}
+
+function stopPokeHover() {
+  clearTimeout(pokeHoverTimer);
+  pokeHoverTimer = null;
+  pokeHoverTriggered = false;
+}
+
 // ── Main update ──
 
 function updateStatus(status) {
@@ -1104,6 +1243,7 @@ function buildConfigPage() {
   addChoiceRow(charMenu, 'Bubble', appearance.bubble, [['off', 'Off'], ['alerts', 'Alerts'], ['all', 'All']], (v) => setAppearance('bubble', v));
   addChoiceRow(charMenu, 'State', appearance.stateLabel, [['off', 'Off'], ['minimal', 'Minimal'], ['alerts', 'Alerts'], ['always', 'Always']], (v) => setAppearance('stateLabel', v));
   addChoiceRow(charMenu, 'Identity', appearance.identity, [['hidden', 'Hidden'], ['hover', 'Hover'], ['always', 'Always']], (v) => { identityPinned = false; localStorage.removeItem('petIdentityPinned'); setAppearance('identity', v); });
+  addChoiceRow(charMenu, 'Poke', appearance.poke, [['on', 'On'], ['off', 'Off']], (v) => setAppearance('poke', v));
   if (sessionNameEl.textContent) addMenuItem(charMenu, identityPinned ? 'Unpin identity' : 'Pin identity', () => { identityPinned = !identityPinned; localStorage.setItem('petIdentityPinned', String(identityPinned)); applyConfig(); buildConfigPage(); });
   addDivider(charMenu);
   addSliderRow(charMenu, 'Scale', petScale, 1, 2, 0.1, (v) => { petScale = v; saveConfig('petScale', String(v)); }, '%');
@@ -1266,6 +1406,22 @@ window.addEventListener('blur', closeMenu);
 for (const el of [imgWrapper, asciiPre, bubble, stateLabel]) {
   el.addEventListener('mousedown', startDrag);
 }
+
+// Poke tracking deliberately lives beside (rather than inside) the drag
+// handler. Native Tauri dragging still starts on mousedown, while the
+// movement/hold record decides whether the resulting mouseup is a click.
+artStage.addEventListener('pointerdown', beginPokePointer);
+artStage.addEventListener('mousedown', beginPokePointer);
+window.addEventListener('pointermove', markPokePointerMoved);
+window.addEventListener('mousemove', markPokePointerMoved);
+window.addEventListener('pointerup', endPokePointer);
+window.addEventListener('mouseup', endPokePointer);
+window.addEventListener('pointercancel', cancelPokePointer);
+window.addEventListener('blur', cancelPokePointer);
+artStage.addEventListener('click', handlePokeClick);
+artStage.addEventListener('dblclick', handlePokeDoubleClick);
+artStage.addEventListener('mouseenter', startPokeHover);
+artStage.addEventListener('mouseleave', stopPokeHover);
 
 // State gem hover interaction
 if (stateGem && stateGemTip) {
