@@ -505,6 +505,13 @@ function setImage(src) {
     imgEl.style.opacity = '0';
     loadAsset(src).then(url => {
       if (url !== src) setImage(src); // retry with cached version
+      else {
+        // External load failed (e.g. bundled ferris SVGs) — show the
+        // original path directly rather than leaving the img invisible.
+        currentImgSrc = src;
+        imgEl.src = src;
+        imgEl.style.opacity = '1';
+      }
     });
     return;
   }
