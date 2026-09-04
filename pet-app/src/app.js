@@ -293,6 +293,7 @@ let pokeCooldownUntil = 0;
 let pokeHoverTimer = null;
 let pokeHoverTriggered = false;
 let pokePointer = null;
+let dragSession = null;
 let pokeClickAllowed = false;
 let pokeGestureInvalid = false;
 let pokeClickTimer = null;
@@ -800,7 +801,7 @@ function rememberReaction(id) {
 }
 
 async function playReaction(reaction, requestVersion) {
-  if (ALERT_STATES.has(currentBusinessState)) return;
+  if (ALERT_STATES.has(currentBusinessState) || dragSession) return;
   const statusVersion = statusUpdateVersion;
   const extensions = ['webp', 'gif', 'svg'];
   let reactionPath = null;
@@ -815,7 +816,7 @@ async function playReaction(reaction, requestVersion) {
       break;
     }
   }
-  if (!reactionPath || ALERT_STATES.has(currentBusinessState)) return;
+  if (!reactionPath || ALERT_STATES.has(currentBusinessState) || dragSession) return;
 
   // Only pre-empt the current lower-priority animation after an asset was
   // found; a missing reaction must leave the normal animation untouched.
@@ -878,7 +879,88 @@ function markPokePointerMoved(event) {
   if (!pokePointer) return;
   const dx = event.clientX - pokePointer.x;
   const dy = event.clientY - pokePointer.y;
-  if (Math.hypot(dx, dy) > POKE_CLICK_DISTANCE) pokePointer.moved = true;
+  if (Math.hypot(dx, dy) > POKE_CLICK_DISTANCE) {
+    pokePointer.moved = true;
+    maybeStartPokeDrag();
+  }
+}
+
+async function beginPokeDrag(pointer, session) {
+  const extensions = ['webp', 'gif', 'svg'];
+  let reactionPath = null;
+
+  for (const extension of extensions) {
+    const candidate = `${mode}/reaction_drag.${extension}`;
+    const url = await verifyImageAsset(candidate);
+    if (dragSession !== session || statusUpdateVersion !== session.statusVersion
+      || ALERT_STATES.has(currentBusinessState)) return;
+    if (url) {
+      reactionPath = candidate;
+      break;
+    }
+  }
+
+  // Drag reactions are optional. Keep the animation that was already playing
+  // when no drag asset exists.
+  if (!reactionPath || dragSession !== session) {
+    if (dragSession === session) dragSession = null;
+    session.active = false;
+    return;
+  }
+
+  cancelActiveOneShot();
+  clearTimeout(idleVariationTimer);
+  idleVariationTimer = null;
+  const oneShot = {
+    type: 'drag',
+    priority: PRIORITY.REACTION,
+    targetState: session.targetState,
+    timerIds: [],
+  };
+  session.active = true;
+  session.oneShot = oneShot;
+  activeOneShot = oneShot;
+  showImage();
+  setVisualAnimation('reaction');
+  setImage(reactionPath);
+}
+
+function maybeStartPokeDrag() {
+  const pointer = pokePointer;
+  if (!pointer || pointer.dragStarted || !pointer.moved || !pointer.held) return;
+  if (ALERT_STATES.has(currentBusinessState)) return;
+
+  pointer.dragStarted = true;
+  const session = {
+    targetState: currentBusinessState,
+    statusVersion: statusUpdateVersion,
+    active: false,
+    oneShot: null,
+  };
+  pointer.dragSession = session;
+  dragSession = session;
+  // Invalidate any reaction lookup already in flight. The existing reaction
+  // remains visible until the optional drag asset has been verified.
+  reactionRequestVersion++;
+  beginPokeDrag(pointer, session);
+}
+
+function cancelPokeDrag() {
+  const session = dragSession;
+  dragSession = null;
+  if (session) session.active = false;
+  if (activeOneShot && activeOneShot.type === 'drag') cancelActiveOneShot();
+}
+
+function finishPokeDrag(session) {
+  if (!session || dragSession !== session) return;
+  dragSession = null;
+  const wasActive = session.active && activeOneShot === session.oneShot;
+  session.active = false;
+  if (wasActive) {
+    cancelActiveOneShot();
+    if (!ALERT_STATES.has(currentBusinessState)) startStateLoop(currentBusinessState);
+  }
 }
 
 function beginPokePointer(event) {
@@ -892,7 +974,10 @@ function beginPokePointer(event) {
     startedAt,
     moved: false,
     holdTimer: setTimeout(() => {
-      if (pokePointer && pokePointer.startedAt === startedAt) pokePointer.held = true;
+      if (pokePointer && pokePointer.startedAt === startedAt) {
+        pokePointer.held = true;
+        maybeStartPokeDrag();
+      }
     }, POKE_CLICK_HOLD_MS),
   };
   pokeClickAllowed = false;
@@ -904,6 +989,7 @@ function endPokePointer(event) {
   markPokePointerMoved(event);
   const pointer = pokePointer;
   clearTimeout(pointer.holdTimer);
+  finishPokeDrag(pointer.dragSession);
   pokePointer = null;
   // Releasing outside the art stage is not a click, even if the pointer did
   // not move far enough to be classified as a drag.
@@ -915,7 +1001,11 @@ function endPokePointer(event) {
 }
 
 function cancelPokePointer() {
-  if (pokePointer) clearTimeout(pokePointer.holdTimer);
+  if (pokePointer) {
+    clearTimeout(pokePointer.holdTimer);
+    finishPokeDrag(pokePointer.dragSession);
+  }
+  cancelPokeDrag();
   pokePointer = null;
   pokeClickAllowed = false;
   pokeGestureInvalid = true;
@@ -980,9 +1070,14 @@ function stopPokeHover() {
 
 function updateStatus(status) {
   statusUpdateVersion++;
-  // Any business-status event wins over a temporary reaction, including an
-  // update that repeats the same state.
+  // Any business-status event wins over a temporary reaction or drag,
+  // including an update that repeats the same state.
   const reactionWasActive = activeOneShot && activeOneShot.type === 'reaction';
+  const dragWasActive = !!dragSession || (activeOneShot && activeOneShot.type === 'drag');
+  if (dragWasActive) {
+    reactionRequestVersion++;
+    cancelPokeDrag();
+  }
   if (reactionWasActive) {
     reactionRequestVersion++;
     cancelActiveOneShot();
@@ -1057,7 +1152,7 @@ function updateStatus(status) {
 
   // Restore the same business loop when a same-state update interrupts a
   // reaction; otherwise the normal state-change handling below applies.
-  if (reactionWasActive && !stateChanged && visualState === state) {
+  if ((reactionWasActive || dragWasActive) && !stateChanged && visualState === state) {
     startStateLoop(state);
     return;
   }

@@ -693,16 +693,16 @@ fn cmd_react(args: &[String]) {
     let log_path = pet_dir.join("pet-debug.log");
 
     let emotion = get_arg(args, "--emotion").unwrap_or_default();
-    if !matches!(emotion.as_str(), "happy" | "sad" | "shocked" | "celebrate" | "shy") {
-        eprintln!("Unknown emotion: {} (expected happy, sad, shocked, celebrate, or shy)", emotion);
+    if !matches!(emotion.as_str(), "happy" | "sad" | "shocked" | "celebrate" | "shy" | "drag") {
+        eprintln!("Unknown emotion: {} (expected happy, sad, shocked, celebrate, shy, or drag)", emotion);
         std::process::exit(1);
     }
     let Some(message) = get_arg(args, "--message") else {
-        eprintln!("Usage: claude-status-pet react --emotion <happy|sad|shocked|celebrate|shy> --message <text> --session <id> [--speak]");
+        eprintln!("Usage: claude-status-pet react --emotion <happy|sad|shocked|celebrate|shy|drag> --message <text> --session <id> [--speak]");
         std::process::exit(1);
     };
     let Some(session_id) = get_arg(args, "--session") else {
-        eprintln!("Usage: claude-status-pet react --emotion <happy|sad|shocked|celebrate|shy> --message <text> --session <id> [--speak]");
+        eprintln!("Usage: claude-status-pet react --emotion <happy|sad|shocked|celebrate|shy|drag> --message <text> --session <id> [--speak]");
         std::process::exit(1);
     };
     if !is_safe_session_id(&session_id) {
