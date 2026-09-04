@@ -278,12 +278,12 @@ function getWatchdogConfig(config) {
       : DEFAULT_WATCHDOG.sleep_after_seconds;
     const exitSec = (typeof config.watchdog.exit_after_seconds === 'number'
       && Number.isFinite(config.watchdog.exit_after_seconds)
-      && config.watchdog.exit_after_seconds > 0)
+      && config.watchdog.exit_after_seconds >= 0)
       ? config.watchdog.exit_after_seconds
       : DEFAULT_WATCHDOG.exit_after_seconds;
     const forceExitSec = (typeof config.watchdog.force_exit_after_seconds === 'number'
       && Number.isFinite(config.watchdog.force_exit_after_seconds)
-      && config.watchdog.force_exit_after_seconds > 0)
+      && config.watchdog.force_exit_after_seconds >= 0)
       ? config.watchdog.force_exit_after_seconds
       : DEFAULT_WATCHDOG.force_exit_after_seconds;
     return {
@@ -1142,39 +1142,47 @@ function checkWatchdog() {
   const now = Date.now();
   const elapsedMs = now - lastStatusEventAt;
 
-  // 工作状态豁免：working/editing/running/thinking 等状态下的长静默通常是
-  // 一次长工具调用，不是闲置。此时不 sleep、不 exit，仅受 force_exit 兜底
-  // （防止上游 Clawd 崩溃后状态永远停在工作态，桌宠变僵尸）。
+  // 1. 工作状态豁免：working/editing/running/thinking 等非静默状态下的长静默通常是
+  // 一次长工具调用，不是闲置。此时不参与 sleep 与正常 exit 梯级，仅受 force_exit
+  // 兜底（防止上游 Clawd 崩溃后状态永远停在工作态，桌宠变僵尸；设为 0 则禁用）。
+  // force_exit 不适用于静默状态：用户显式设 exit_after_seconds: 0 选择“只睡不退”时，
+  // 睡着的桌宠不应被兜底杀掉。
   if (!QUIESCENT_STATES.has(currentBusinessState)) {
-    const forceExitAfterMs = wd.force_exit_after_seconds * 1000;
-    if (elapsedMs >= forceExitAfterMs && window.__TAURI__) {
-      window.__TAURI__.window.getCurrentWindow().close();
-    }
-    return;
-  }
-
-  const exitAfterMs = wd.exit_after_seconds * 1000;
-  const sleepAfterMs = wd.sleep_after_seconds * 1000;
-
-  // exit 级：>= exitAfterMs
-  if (elapsedMs >= exitAfterMs) {
-    if (window.__TAURI__) {
-      window.__TAURI__.window.getCurrentWindow().close();
-    } else {
-      // 浏览器 demo 模式停留在 offline 即可，不得报错
-      if (currentBusinessState !== 'offline') {
-        updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+    if (wd.force_exit_after_seconds > 0) {
+      const forceExitAfterMs = wd.force_exit_after_seconds * 1000;
+      if (elapsedMs >= forceExitAfterMs && window.__TAURI__) {
+        window.__TAURI__.window.getCurrentWindow().close();
       }
     }
     return;
   }
 
-  // sleep 级：>= sleepAfterMs
-  if (elapsedMs >= sleepAfterMs) {
-    if (currentBusinessState !== 'offline') {
-      updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+  // 2. 静默状态梯级判定（exit 优先于 sleep）
+  // exit 级：若设置为 0 则禁用正常退出（桌宠仅休眠，不自动退出）
+  if (wd.exit_after_seconds > 0) {
+    const exitAfterMs = wd.exit_after_seconds * 1000;
+    if (elapsedMs >= exitAfterMs) {
+      if (window.__TAURI__) {
+        window.__TAURI__.window.getCurrentWindow().close();
+      } else {
+        // 浏览器 demo 模式停留在 offline 即可，不得报错
+        if (currentBusinessState !== 'offline') {
+          updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+        }
+      }
+      return;
     }
-    return;
+  }
+
+  // sleep 级：>= sleepAfterMs
+  if (wd.sleep_after_seconds > 0) {
+    const sleepAfterMs = wd.sleep_after_seconds * 1000;
+    if (elapsedMs >= sleepAfterMs) {
+      if (currentBusinessState !== 'offline') {
+        updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+      }
+      return;
+    }
   }
 }
 
