@@ -302,6 +302,7 @@ let visualState = '';
 let currentState = 'idle';
 let activeCharacterConfig = null;
 let latestStatus = null;
+let initialized = false;
 let identityPinned = localStorage.getItem('petIdentityPinned') === 'true';
 let currentImgSrc = '';
 let bubbleTimeout = null;
@@ -501,6 +502,7 @@ function setImage(src) {
   if (resolved === currentImgSrc) return;
   // If asset not yet cached, try loading it on-demand (fixes race with preload)
   if (resolved === src && hasExternalAssets && window.__TAURI__) {
+    imgEl.style.opacity = '0';
     loadAsset(src).then(url => {
       if (url !== src) setImage(src); // retry with cached version
     });
@@ -1186,6 +1188,8 @@ function updateStatus(status, isRealEvent = false) {
   currentBusinessState = state;
   currentState = state;
 
+  if (!initialized) return;
+
   // Status text and state label always display the true business state immediately
   stateLabel.textContent = state;
   stateLabel.hidden = !shouldShowStateLabel(state);
@@ -1540,7 +1544,6 @@ async function selectChar(newMode) {
   localStorage.setItem('petMode', mode);
   closeMenu();
   currentImgSrc = '';
-  imgEl.src = '';
 
   cancelActiveOneShot();
   clearTimeout(autoReturnTimer);
@@ -1868,13 +1871,15 @@ async function preloadAssets() {
     localStorage.setItem('petMode', mode);
   }
 
-  // If current mode is a DLC that's installed, preload it
-  if (GIF_MODES[mode] && dlcInstalledCache[mode]) {
+  // If current mode has external assets, preload it
+  if (GIF_MODES[mode] && hasExternalAssets) {
     await preloadAssets();
   }
 
+  initialized = true;
   activeCharacterConfig = CHARACTER_CONFIGS[mode] || null;
   applyConfig();
+  visualState = '';
   // A status watcher can resolve while pack discovery is still async. Preserve
   // that real state rather than flashing/locking the renderer to idle.
   updateStatus(latestStatus || { state: 'idle', detail: '' });
