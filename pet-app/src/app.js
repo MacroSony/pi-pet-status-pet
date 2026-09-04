@@ -295,7 +295,10 @@ let petSessionBg = localStorage.getItem('petSessionBg') || '';
 let petFontSize = parseInt(localStorage.getItem('petFontSize') || '16');
 let petScale = parseFloat(localStorage.getItem('petScale') || '1');
 let currentBusinessState = 'idle';
-let visualState = 'idle';
+// Empty string (not 'idle') so the first updateStatus always renders —
+// otherwise the initial idle update is seen as "no change" and the
+// default <img> from index.html (ferris/1.svg) is never replaced.
+let visualState = '';
 let currentState = 'idle';
 let activeCharacterConfig = null;
 let latestStatus = null;
@@ -1544,6 +1547,9 @@ async function selectChar(newMode) {
   autoReturnTimer = null;
   clearTimeout(idleVariationTimer);
   idleVariationTimer = null;
+  // Force a re-render: the business state likely did not change, and
+  // updateStatus only starts the loop when visualState differs.
+  visualState = '';
 
   // Show the character immediately with whatever is available
   updateStatus({ state: currentBusinessState, detail: statusText.textContent });
