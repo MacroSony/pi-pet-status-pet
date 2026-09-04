@@ -58,6 +58,11 @@ Create `<pack-dir>/character.json`:
   "version": 2,
   "type": "gif",
   "auto_return_seconds": 90,
+  "watchdog": {
+    "enabled": true,
+    "sleep_after_seconds": 900,
+    "exit_after_seconds": 3600
+  },
   "appearance": {
     "motion": "full",
     "uiPreset": "classic",
@@ -99,7 +104,7 @@ Create `<pack-dir>/character.json`:
 ```
 
 **Important:**
-- `version`: Optional schema version number (`2` for transition / variation / auto-return support). Legacy v1 configs without `version` continue to work seamlessly.
+- `version`: Optional schema version number (`2` for transition / variation / auto-return / watchdog support). Legacy v1 configs without `version` continue to work seamlessly.
 - `type` must be `"webp"`, `"gif"`, `"png"`, or `"svg"`
 - Image paths are relative to the `assets/` or `characters/` parent directory, prefixed with the pack name
 - Each state value is an **array** of paths (for random variety)
@@ -107,7 +112,7 @@ Create `<pack-dir>/character.json`:
 
 ### Schema Version 2 Features
 
-Version 2 introduces transitions, idle variations, and auto-return decay:
+Version 2 introduces transitions, idle variations, auto-return decay, and session watchdog:
 
 #### 1. Transitions (`transitions`)
 Defines one-shot animation clips played when transitioning between specific states (e.g. `idle->editing`):
@@ -135,8 +140,9 @@ Controls how long the pet remains in an active non-alert state without receiving
 "auto_return_seconds": 90
 ```
 - **Type**: Number (seconds). Default: `90`.
-- **Behavior**: If no new `status-update` event is received within this duration while in a non-alert state (e.g. `thinking`, `reading`, `editing`, `searching`, `running`, `delegating`, `offline`), the visual animation automatically plays the transition to `idle` (or returns directly to `idle` loop).
+- **Behavior**: If no new `status-update` event is received within this duration while in a non-alert active state (e.g. `thinking`, `reading`, `editing`, `searching`, `running`, `delegating`), the visual animation automatically plays the transition to `idle` (or returns directly to `idle` loop).
 - **Alert preservation**: Alert states (`error`, `waiting`) **never** decay and will stay active until resolved.
+- **Offline preservation**: Sleeping/offline states (`offline`) do not decay to `idle`.
 - **State label**: The state label and status text always display the true business state from the assistant.
 
 #### 3. Idle Variations (`idle_variations`)
@@ -153,10 +159,26 @@ Provides random one-shot animations while resting in `idle`:
 - **Completion**: Once finished, the pet returns to the base `idle` loop and resets the 30-second variation timer.
 - **Silent degradation**: If a variation asset fails to load, it is silently skipped without interrupting the idle state.
 
-#### 4. Priority & Interruption Rules
+#### 4. Session Watchdog (`watchdog`)
+Controls watchdog timeouts to handle idle sessions and orphaned pet processes with a two-tier ladder (`sleep` → `exit`):
+```json
+"watchdog": {
+  "enabled": true,
+  "sleep_after_seconds": 900,
+  "exit_after_seconds": 3600
+}
+```
+- **`enabled`**: Boolean (default: `true`). If set to `false`, the session watchdog timer is completely disabled.
+- **`sleep_after_seconds`**: Number (seconds, default: `900` / 15 minutes). When no real status update events have been received for this duration while in a non-alert state, the pet goes to sleep (`offline` state with `"Zzz... (session silent)"`).
+- **`exit_after_seconds`**: Number (seconds, default: `3600` / 60 minutes). When no real status update events have been received for this duration while in a non-alert state, the pet window automatically exits/closes to avoid orphan processes.
+- **Alert exemption**: Alert states (`error`, `waiting`) **never** trigger sleep or exit (the pet remains visible and attentive while waiting for user interaction or approval). Timing continues accumulating and is evaluated once leaving the alert state.
+- **Wake-up**: Any incoming real status update immediately resets the watchdog timer and wakes the pet up without special wake-up logic.
+- **Backward Compatibility**: Packs omitting `watchdog` automatically use the default enabled settings (900s sleep / 3600s exit).
+
+#### 5. Priority & Interruption Rules
 - **Alerts preempt everything**: Incoming alert states (`error`, `waiting`) immediately abort any running transition or idle variation and instantly switch to the alert state loop.
 - **Status Text & State Label**: Reflect the true business state immediately, regardless of ongoing transition animations.
-- **Backward Compatibility**: Packs created for v1 (omitting `transitions`, `idle_variations`, or `auto_return_seconds`) continue to function identically to legacy behavior. All new fields are completely optional.
+- **Backward Compatibility**: Packs created for v1 (omitting `transitions`, `idle_variations`, `auto_return_seconds`, or `watchdog`) continue to function identically to legacy behavior. All new fields are completely optional.
 
 ### Optional appearance recommendations
 

@@ -250,6 +250,40 @@ function getAutoReturnSeconds(config) {
   return 90;
 }
 
+const DEFAULT_WATCHDOG = Object.freeze({
+  enabled: true,
+  sleep_after_seconds: 900,
+  exit_after_seconds: 3600,
+});
+
+function getWatchdogConfig(config) {
+  if (!config || config.watchdog === undefined || config.watchdog === null) {
+    return { ...DEFAULT_WATCHDOG };
+  }
+  if (config.watchdog === false) {
+    return { ...DEFAULT_WATCHDOG, enabled: false };
+  }
+  if (typeof config.watchdog === 'object') {
+    const enabled = config.watchdog.enabled !== false;
+    const sleepSec = (typeof config.watchdog.sleep_after_seconds === 'number'
+      && Number.isFinite(config.watchdog.sleep_after_seconds)
+      && config.watchdog.sleep_after_seconds > 0)
+      ? config.watchdog.sleep_after_seconds
+      : DEFAULT_WATCHDOG.sleep_after_seconds;
+    const exitSec = (typeof config.watchdog.exit_after_seconds === 'number'
+      && Number.isFinite(config.watchdog.exit_after_seconds)
+      && config.watchdog.exit_after_seconds > 0)
+      ? config.watchdog.exit_after_seconds
+      : DEFAULT_WATCHDOG.exit_after_seconds;
+    return {
+      enabled,
+      sleep_after_seconds: sleepSec,
+      exit_after_seconds: exitSec,
+    };
+  }
+  return { ...DEFAULT_WATCHDOG };
+}
+
 // ── State ──
 let mode = localStorage.getItem('petMode') || 'ferris';
 let eye = localStorage.getItem('petEye') || '·';
@@ -284,6 +318,9 @@ let idleVariationTimer = null; // Timer for idle variation triggers
 let statusUpdateVersion = 0;
 let reactionRequestVersion = 0;
 const consumedReactionIds = new Set();
+let lastStatusEventAt = Date.now();
+const WATCHDOG_INTERVAL_MS = 30000;
+let watchdogTimer = null;
 
 const POKE_COOLDOWN_MS = 4000;
 const POKE_HOVER_MS = 3000;
@@ -760,8 +797,8 @@ function scheduleAutoReturn(state) {
   clearTimeout(autoReturnTimer);
   autoReturnTimer = null;
 
-  // Alerts (error, waiting) do not decay
-  if (ALERT_STATES.has(state) || state === 'idle') {
+  // Alerts (error, waiting) and offline do not decay
+  if (ALERT_STATES.has(state) || state === 'idle' || state === 'offline') {
     return;
   }
 
@@ -774,7 +811,7 @@ function scheduleAutoReturn(state) {
 }
 
 function onAutoReturnDecay() {
-  if (ALERT_STATES.has(currentBusinessState) || visualState === 'idle') {
+  if (ALERT_STATES.has(currentBusinessState) || visualState === 'idle' || currentBusinessState === 'offline') {
     return;
   }
 
@@ -1066,9 +1103,53 @@ function stopPokeHover() {
   pokeHoverTriggered = false;
 }
 
+// ── Session Watchdog ──
+
+function checkWatchdog() {
+  const cfg = activeCharacterConfig || CHARACTER_CONFIGS[mode];
+  const wd = getWatchdogConfig(cfg);
+  if (!wd.enabled) return;
+
+  // alert 豁免：当前业务状态为 error/waiting 时，sleep 与 exit 均不触发
+  if (ALERT_STATES.has(currentBusinessState)) {
+    return;
+  }
+
+  const now = Date.now();
+  const elapsedMs = now - lastStatusEventAt;
+  const exitAfterMs = wd.exit_after_seconds * 1000;
+  const sleepAfterMs = wd.sleep_after_seconds * 1000;
+
+  // exit 级：>= exitAfterMs
+  if (elapsedMs >= exitAfterMs) {
+    if (window.__TAURI__) {
+      window.__TAURI__.window.getCurrentWindow().close();
+    } else {
+      // 浏览器 demo 模式停留在 offline 即可，不得报错
+      if (currentBusinessState !== 'offline') {
+        updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+      }
+    }
+    return;
+  }
+
+  // sleep 级：>= sleepAfterMs
+  if (elapsedMs >= sleepAfterMs) {
+    if (currentBusinessState !== 'offline') {
+      updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+    }
+    return;
+  }
+}
+
+watchdogTimer = setInterval(checkWatchdog, WATCHDOG_INTERVAL_MS);
+
 // ── Main update ──
 
-function updateStatus(status) {
+function updateStatus(status, isRealEvent = false) {
+  if (isRealEvent) {
+    lastStatusEventAt = Date.now();
+  }
   statusUpdateVersion++;
   // Any business-status event wins over a temporary reaction or drag,
   // including an update that repeats the same state.
@@ -1131,7 +1212,7 @@ function updateStatus(status) {
       bubbleTimeout = setTimeout(() => { bubble.classList.add('hidden'); }, 30000);
     }
   } else if (state === 'offline' && shouldShowBubble(state)) {
-    statusText.textContent = 'Zzz...';
+    statusText.textContent = detail || 'Zzz...';
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     bubbleTimeout = setTimeout(() => { bubble.classList.add('hidden'); }, 30000);
@@ -1564,7 +1645,7 @@ async function bindToSession(sessionId) {
 
 // ── Listen for status updates ──
 if (window.__TAURI__) {
-  window.__TAURI__.event.listen('status-update', (e) => updateStatus(e.payload));
+  window.__TAURI__.event.listen('status-update', (e) => updateStatus(e.payload, true));
   window.__TAURI__.event.listen('reaction-event', (e) => handleReactionEvent(e.payload));
   window.__TAURI__.core.invoke('get_session_id').then((sid) => {
     if (sid) {
@@ -1574,7 +1655,7 @@ if (window.__TAURI__) {
       showSessionPicker();
     }
   });
-  window.__TAURI__.core.invoke('get_status').then((s) => { if (s) updateStatus(s); });
+  window.__TAURI__.core.invoke('get_status').then((s) => { if (s) updateStatus(s, true); });
 } else {
   // Browser demo mode: demo cycle showcasing transitions and state loops
   const demos = [
@@ -1589,7 +1670,7 @@ if (window.__TAURI__) {
     { state: 'offline', detail: 'Session ended' },
   ];
   let i = 0;
-  setInterval(() => updateStatus(demos[i++ % demos.length]), 4000);
+  setInterval(() => updateStatus(demos[i++ % demos.length], true), 4000);
 }
 
 // ── Asset loading ──
