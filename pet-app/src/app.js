@@ -188,6 +188,11 @@ const PRIORITY = {
 
 const ALERT_STATES = new Set(['error', 'waiting']);
 
+// 静止状态：只有处于这些业务状态时看门狗才允许 sleep/exit。
+// 工作态（working/editing/running/thinking/delegating/reading/searching）下
+// 长时间静默通常是一次长工具调用（如几分钟的 bash、编译），不是会话闲置。
+const QUIESCENT_STATES = new Set(['idle', 'offline']);
+
 // Helper functions for character.json v2 schema
 function getTransitionConfig(config, fromState, toState) {
   if (!config || !config.transitions || typeof config.transitions !== 'object') return null;
@@ -254,6 +259,7 @@ const DEFAULT_WATCHDOG = Object.freeze({
   enabled: true,
   sleep_after_seconds: 900,
   exit_after_seconds: 3600,
+  force_exit_after_seconds: 14400,
 });
 
 function getWatchdogConfig(config) {
@@ -275,10 +281,16 @@ function getWatchdogConfig(config) {
       && config.watchdog.exit_after_seconds > 0)
       ? config.watchdog.exit_after_seconds
       : DEFAULT_WATCHDOG.exit_after_seconds;
+    const forceExitSec = (typeof config.watchdog.force_exit_after_seconds === 'number'
+      && Number.isFinite(config.watchdog.force_exit_after_seconds)
+      && config.watchdog.force_exit_after_seconds > 0)
+      ? config.watchdog.force_exit_after_seconds
+      : DEFAULT_WATCHDOG.force_exit_after_seconds;
     return {
       enabled,
       sleep_after_seconds: sleepSec,
       exit_after_seconds: exitSec,
+      force_exit_after_seconds: forceExitSec,
     };
   }
   return { ...DEFAULT_WATCHDOG };
@@ -1129,6 +1141,18 @@ function checkWatchdog() {
 
   const now = Date.now();
   const elapsedMs = now - lastStatusEventAt;
+
+  // 工作状态豁免：working/editing/running/thinking 等状态下的长静默通常是
+  // 一次长工具调用，不是闲置。此时不 sleep、不 exit，仅受 force_exit 兜底
+  // （防止上游 Clawd 崩溃后状态永远停在工作态，桌宠变僵尸）。
+  if (!QUIESCENT_STATES.has(currentBusinessState)) {
+    const forceExitAfterMs = wd.force_exit_after_seconds * 1000;
+    if (elapsedMs >= forceExitAfterMs && window.__TAURI__) {
+      window.__TAURI__.window.getCurrentWindow().close();
+    }
+    return;
+  }
+
   const exitAfterMs = wd.exit_after_seconds * 1000;
   const sleepAfterMs = wd.sleep_after_seconds * 1000;
 

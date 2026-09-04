@@ -61,7 +61,8 @@ Create `<pack-dir>/character.json`:
   "watchdog": {
     "enabled": true,
     "sleep_after_seconds": 900,
-    "exit_after_seconds": 3600
+    "exit_after_seconds": 3600,
+    "force_exit_after_seconds": 14400
   },
   "appearance": {
     "motion": "full",
@@ -165,15 +166,18 @@ Controls watchdog timeouts to handle idle sessions and orphaned pet processes wi
 "watchdog": {
   "enabled": true,
   "sleep_after_seconds": 900,
-  "exit_after_seconds": 3600
+  "exit_after_seconds": 3600,
+  "force_exit_after_seconds": 14400
 }
 ```
 - **`enabled`**: Boolean (default: `true`). If set to `false`, the session watchdog timer is completely disabled.
-- **`sleep_after_seconds`**: Number (seconds, default: `900` / 15 minutes). When no real status update events have been received for this duration while in a non-alert state, the pet goes to sleep (`offline` state with `"Zzz... (session silent)"`).
-- **`exit_after_seconds`**: Number (seconds, default: `3600` / 60 minutes). When no real status update events have been received for this duration while in a non-alert state, the pet window automatically exits/closes to avoid orphan processes.
+- **`sleep_after_seconds`**: Number (seconds, default: `900` / 15 minutes). When no real status update events have been received for this duration while in a quiescent state, the pet goes to sleep (`offline` state with `"Zzz... (session silent)"`).
+- **`exit_after_seconds`**: Number (seconds, default: `3600` / 60 minutes). When no real status update events have been received for this duration while in a quiescent state, the pet window automatically exits/closes to avoid orphan processes.
+- **`force_exit_after_seconds`**: Number (seconds, default: `14400` / 4 hours). Backstop for non-quiescent states: if the business state is stuck in a working state (e.g. the upstream session aggregator crashed mid-turn) and no real events arrive for this duration, the pet exits anyway.
 - **Alert exemption**: Alert states (`error`, `waiting`) **never** trigger sleep or exit (the pet remains visible and attentive while waiting for user interaction or approval). Timing continues accumulating and is evaluated once leaving the alert state.
+- **Quiescent gating**: Sleep and normal exit only trigger while the business state is quiescent (`idle` or `offline`). Long silence during working states (`working`, `editing`, `running`, `thinking`, `delegating`, `reading`, `searching`) usually means a long-running tool call, not an idle session — the pet stays awake and only the `force_exit_after_seconds` backstop applies.
 - **Wake-up**: Any incoming real status update immediately resets the watchdog timer and wakes the pet up without special wake-up logic.
-- **Backward Compatibility**: Packs omitting `watchdog` automatically use the default enabled settings (900s sleep / 3600s exit).
+- **Backward Compatibility**: Packs omitting `watchdog` automatically use the default enabled settings (900s sleep / 3600s exit / 14400s force-exit).
 
 #### 5. Priority & Interruption Rules
 - **Alerts preempt everything**: Incoming alert states (`error`, `waiting`) immediately abort any running transition or idle variation and instantly switch to the alert state loop.
