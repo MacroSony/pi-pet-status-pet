@@ -1,3 +1,11 @@
+> **Pi Pet renderer fork** — This repository is the Tauri renderer used by
+> [MacroSony/pi-pet](https://github.com/MacroSony/pi-pet), not an official upstream release.
+> Start with the parent repository's build/launch instructions. The fork adds
+> explicit-session presentation, reactions, animation transitions, and watchdog behavior.
+> The upstream plugin install/update and download links below install
+> [moeyui1/claude-status-pet](https://github.com/moeyui1/claude-status-pet),
+> not this fork; do not use them to update a Pi Pet renderer build.
+
 # Claude Status Pet
 
 [English](README.md) | [中文](README.zh-CN.md)
