@@ -334,6 +334,16 @@ let idleVariationTimer = null; // Timer for idle variation triggers
 let statusUpdateVersion = 0;
 let reactionRequestVersion = 0;
 const consumedReactionIds = new Set();
+const eventDedup = (typeof PetEvents !== 'undefined' && PetEvents.createEventDedupTracker)
+  ? PetEvents.createEventDedupTracker()
+  : {
+      remember: (id) => {
+        if (!id || typeof id !== 'string' || consumedReactionIds.has(id.trim())) return false;
+        consumedReactionIds.add(id.trim());
+        return true;
+      },
+      has: (id) => typeof id === 'string' && consumedReactionIds.has(id.trim()),
+    };
 let lastStatusEventAt = Date.now();
 const WATCHDOG_INTERVAL_MS = 30000;
 let watchdogTimer = null;
@@ -856,61 +866,146 @@ function reactionIsExpired(reaction) {
 }
 
 function rememberReaction(id) {
-  if (typeof id !== 'string' || !id || consumedReactionIds.has(id)) return false;
-  consumedReactionIds.add(id);
-  return true;
+  return eventDedup.remember(id);
+}
+
+async function playExpression(event) {
+  if (ALERT_STATES.has(currentBusinessState) || dragSession) return;
+  const requestVersion = ++reactionRequestVersion;
+  const statusVersion = statusUpdateVersion;
+
+  const payload = (event && event.payload) || {};
+  const text = typeof payload.text === 'string' && payload.text.trim().length > 0 ? payload.text : null;
+  const emotion = typeof payload.emotion === 'string' && payload.emotion ? payload.emotion : null;
+  const durationMs = (typeof payload.durationMs === 'number' && payload.durationMs > 0) ? payload.durationMs : 2500;
+
+  // 1. Text display in speech bubble (Hard Rule: text shows even if emotion asset is missing)
+  if (text) {
+    clearTimeout(bubbleTimeout);
+    bubbleTimeout = null;
+
+    statusText.textContent = text;
+    container.dataset.bubbleVisible = 'true';
+    bubble.classList.remove('hidden');
+
+    // Pop scale transition
+    bubble.style.transition = 'none';
+    bubble.style.transform = 'scale(0.95)';
+    setTimeout(() => {
+      bubble.style.transition = 'opacity 0.3s ease, transform 0.15s ease';
+      bubble.style.transform = 'scale(1)';
+    }, 50);
+
+    bubbleTimeout = setTimeout(() => {
+      bubbleTimeout = null;
+      if (statusUpdateVersion !== statusVersion) return;
+      // Restore business bubble display according to current status & policy
+      const state = currentBusinessState;
+      const detail = latestStatus ? latestStatus.detail : '';
+      if (shouldShowBubble(state) && (detail || state === 'offline')) {
+        statusText.textContent = detail || (state === 'offline' ? 'Zzz...' : '');
+        bubble.classList.remove('hidden');
+        container.dataset.bubbleVisible = 'true';
+      } else {
+        bubble.classList.add('hidden');
+        container.dataset.bubbleVisible = shouldShowBubble(state) ? 'true' : 'false';
+      }
+    }, durationMs);
+  }
+
+  // 2. Emotion reaction animation
+  if (emotion) {
+    const extensions = ['webp', 'gif', 'svg'];
+    let reactionPath = null;
+
+    // Try convention-based reaction sprite files in order; missing assets are optional.
+    for (const extension of extensions) {
+      const candidate = `${mode}/reaction_${emotion}.${extension}`;
+      const url = await verifyImageAsset(candidate);
+      if (requestVersion !== reactionRequestVersion || statusVersion !== statusUpdateVersion) return;
+      if (url) {
+        reactionPath = candidate;
+        break;
+      }
+    }
+
+    if (!reactionPath || ALERT_STATES.has(currentBusinessState) || dragSession) {
+      // Missing animation asset: reaction skipped silently, text remains visible.
+      return;
+    }
+
+    // Only pre-empt the current lower-priority animation after an asset was
+    // found; a missing reaction must leave the normal animation untouched.
+    cancelActiveOneShot();
+    clearTimeout(idleVariationTimer);
+    idleVariationTimer = null;
+    const timerIds = [];
+    const oneShot = {
+      type: 'reaction',
+      priority: PRIORITY.REACTION,
+      targetState: currentBusinessState,
+      timerIds,
+    };
+    activeOneShot = oneShot;
+    showImage();
+    setVisualAnimation('reaction');
+    setImage(reactionPath);
+
+    const endTimer = setTimeout(() => {
+      if (activeOneShot === oneShot) {
+        activeOneShot = null;
+        startStateLoop(oneShot.targetState);
+      }
+    }, durationMs);
+    timerIds.push(endTimer);
+  }
 }
 
 async function playReaction(reaction, requestVersion) {
-  if (ALERT_STATES.has(currentBusinessState) || dragSession) return;
-  const statusVersion = statusUpdateVersion;
-  const extensions = ['webp', 'gif', 'svg'];
-  let reactionPath = null;
-
-  // Try the convention-based files in order; missing assets are optional.
-  for (const extension of extensions) {
-    const candidate = `${mode}/reaction_${reaction.emotion}.${extension}`;
-    const url = await verifyImageAsset(candidate);
-    if (requestVersion !== reactionRequestVersion || statusVersion !== statusUpdateVersion) return;
-    if (url) {
-      reactionPath = candidate;
-      break;
-    }
-  }
-  if (!reactionPath || ALERT_STATES.has(currentBusinessState) || dragSession) return;
-
-  // Only pre-empt the current lower-priority animation after an asset was
-  // found; a missing reaction must leave the normal animation untouched.
-  cancelActiveOneShot();
-  clearTimeout(idleVariationTimer);
-  idleVariationTimer = null;
-  const timerIds = [];
-  const oneShot = {
-    type: 'reaction',
-    priority: PRIORITY.REACTION,
-    targetState: currentBusinessState,
-    timerIds,
+  const event = {
+    schemaVersion: '1',
+    eventId: reaction.id || `reaction_${Date.now()}`,
+    petId: boundSessionId,
+    kind: 'expression',
+    payload: {
+      text: reaction.message || null,
+      emotion: reaction.emotion || null,
+      speak: !!reaction.speak,
+      priority: PRIORITY.REACTION,
+      durationMs: reaction.ttl_ms || 2500,
+    },
+    createdAtMs: reaction.ts || Date.now(),
+    expiresAtMs: reaction.ts && reaction.ttl_ms ? reaction.ts + reaction.ttl_ms : 0,
   };
-  activeOneShot = oneShot;
-  showImage();
-  setVisualAnimation('reaction');
-  setImage(reactionPath);
-
-  const endTimer = setTimeout(() => {
-    if (activeOneShot === oneShot) {
-      activeOneShot = null;
-      startStateLoop(oneShot.targetState);
-    }
-  }, 2500);
-  timerIds.push(endTimer);
+  playExpression(event);
 }
 
-function handleReactionEvent(reaction) {
-  if (!reaction || !rememberReaction(reaction.id) || reactionIsExpired(reaction)) return;
-  // `message` and `speak` are reserved for the phase-two bubble/TTS interface.
+function handlePetEvent(rawEvent) {
+  const parser = (typeof PetEvents !== 'undefined' && PetEvents.parsePetEvent)
+    ? PetEvents.parsePetEvent
+    : (window.PetEvents && window.PetEvents.parsePetEvent);
+  const parsed = parser ? parser(rawEvent, Date.now()) : { ok: true, event: rawEvent };
+  if (!parsed.ok || !parsed.event) return;
+
+  const event = parsed.event;
+  if (!eventDedup.remember(event.eventId)) return;
   if (ALERT_STATES.has(currentBusinessState)) return;
-  const requestVersion = ++reactionRequestVersion;
-  playReaction(reaction, requestVersion);
+
+  playExpression(event);
+}
+
+function handleReactionEvent(rawReaction) {
+  const parser = (typeof PetEvents !== 'undefined' && PetEvents.parseLegacyReaction)
+    ? PetEvents.parseLegacyReaction
+    : (window.PetEvents && window.PetEvents.parseLegacyReaction);
+  const parsed = parser ? parser(rawReaction, Date.now()) : null;
+  if (!parsed || !parsed.ok || !parsed.event) return;
+
+  const event = parsed.event;
+  if (!eventDedup.remember(event.eventId)) return;
+  if (ALERT_STATES.has(currentBusinessState)) return;
+
+  playExpression(event);
 }
 
 // Poke reactions use the same reaction asset lookup and REACTION one-shot slot
@@ -922,12 +1017,18 @@ function triggerPoke(emotion) {
   if (now < pokeCooldownUntil) return false;
 
   pokeCooldownUntil = now + POKE_COOLDOWN_MS;
-  const requestVersion = ++reactionRequestVersion;
-  playReaction({
-    emotion,
-    ts: now,
-    ttl_ms: 2500,
-  }, requestVersion);
+  playExpression({
+    schemaVersion: '1',
+    eventId: `poke_${now}`,
+    petId: boundSessionId,
+    kind: 'expression',
+    payload: {
+      emotion,
+      durationMs: 2500,
+    },
+    createdAtMs: now,
+    expiresAtMs: now + 2500,
+  });
   return true;
 }
 
@@ -1695,6 +1796,7 @@ async function bindToSession(sessionId) {
 if (window.__TAURI__) {
   window.__TAURI__.event.listen('status-update', (e) => updateStatus(e.payload, true));
   window.__TAURI__.event.listen('reaction-event', (e) => handleReactionEvent(e.payload));
+  window.__TAURI__.event.listen('pet-event', (e) => handlePetEvent(e.payload));
   window.__TAURI__.core.invoke('get_session_id').then((sid) => {
     if (sid) {
       boundSessionId = sid;
@@ -1704,6 +1806,7 @@ if (window.__TAURI__) {
     }
   });
   window.__TAURI__.core.invoke('get_status').then((s) => { if (s) updateStatus(s, true); });
+  window.__TAURI__.core.invoke('get_event').then((e) => { if (e) handlePetEvent(e); });
 } else {
   // Browser demo mode: demo cycle showcasing transitions and state loops
   const demos = [

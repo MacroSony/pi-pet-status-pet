@@ -72,6 +72,41 @@ struct ReactionPayload {
     ttl_ms: u64,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PetEventPayload {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub emotion: Option<String>,
+    #[serde(default)]
+    pub speak: Option<bool>,
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(rename = "durationMs", default)]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PetEvent {
+    #[serde(rename = "schemaVersion", default = "default_schema_version")]
+    pub schema_version: String,
+    #[serde(rename = "eventId")]
+    pub event_id: String,
+    #[serde(rename = "petId", default)]
+    pub pet_id: String,
+    #[serde(default = "default_expression_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub payload: PetEventPayload,
+    #[serde(rename = "createdAtMs", default)]
+    pub created_at_ms: u64,
+    #[serde(rename = "expiresAtMs", default)]
+    pub expires_at_ms: u64,
+}
+
+fn default_schema_version() -> String { "1".to_string() }
+fn default_expression_kind() -> String { "expression".to_string() }
+
 #[derive(Clone, Deserialize, Serialize)]
 struct SavedWindowPosition {
     x: i32,
@@ -137,6 +172,64 @@ fn read_status(path: &PathBuf) -> Option<StatusPayload> {
     })
 }
 
+fn default_pi_pet_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("PI_PET_DATA_DIR").map(PathBuf::from) {
+        return dir;
+    }
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".pi-pet")
+}
+
+pub fn resolve_event_path(status_path: &PathBuf, pet_id: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os("PI_PET_DATA_DIR").map(PathBuf::from) {
+        return dir.join("events").join(format!("event-{}.json", pet_id));
+    }
+    if let Some(status_dir) = std::env::var_os("CLAWD_PET_BRIDGE_STATUS_DIR").map(PathBuf::from) {
+        if let Some(parent) = status_dir.parent() {
+            return parent.join("events").join(format!("event-{}.json", pet_id));
+        }
+    }
+    if let Some(parent) = status_path.parent() {
+        if parent.file_name().map_or(false, |n| n == "status") {
+            if let Some(grandparent) = parent.parent() {
+                return grandparent.join("events").join(format!("event-{}.json", pet_id));
+            }
+        }
+        let sibling_events = parent.join("events").join(format!("event-{}.json", pet_id));
+        if sibling_events.parent().map_or(false, |p| p.exists()) {
+            return sibling_events;
+        }
+    }
+    default_pi_pet_dir().join("events").join(format!("event-{}.json", pet_id))
+}
+
+pub fn read_pet_event(path: &PathBuf, log_path: &PathBuf) -> Option<PetEvent> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) => {
+            debug_log(log_path, &format!("PetEvent read failed: {}", e));
+            return None;
+        }
+    };
+    match serde_json::from_str::<PetEvent>(&content) {
+        Ok(event) => {
+            let now = timestamp_millis();
+            if event.expires_at_ms > 0 && now > event.expires_at_ms {
+                debug_log(log_path, &format!("PetEvent expired: now={}, expiresAtMs={}", now, event.expires_at_ms));
+                return None;
+            }
+            Some(event)
+        }
+        Err(e) => {
+            debug_log(log_path, &format!("PetEvent parse failed: {}", e));
+            None
+        }
+    }
+}
+
 fn read_reaction(path: &PathBuf, log_path: &PathBuf) -> Option<ReactionPayload> {
     let content = match fs::read_to_string(path) {
         Ok(content) => content,
@@ -162,6 +255,15 @@ fn get_status(status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>) -> Option<Stat
 }
 
 #[tauri::command]
+fn get_event(status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>, session_id: tauri::State<'_, Arc<Mutex<String>>>) -> Option<PetEvent> {
+    let path = status_path.lock().unwrap();
+    let sid = session_id.lock().unwrap();
+    if sid.is_empty() { return None; }
+    let event_path = resolve_event_path(&path, &sid);
+    read_pet_event(&event_path, &path)
+}
+
+#[tauri::command]
 fn get_session_id(session_id: tauri::State<'_, Arc<Mutex<String>>>) -> String {
     session_id.lock().unwrap().clone()
 }
@@ -183,40 +285,49 @@ struct SessionInfo {
 
 #[tauri::command]
 fn list_unlocked_sessions() -> Vec<SessionInfo> {
-    let pet_dir = default_pet_dir();
-    let Ok(entries) = fs::read_dir(&pet_dir) else { return vec![] };
     let mut sessions = Vec::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy().to_string();
-        if name_str.starts_with("status-") && name_str.ends_with(".json") {
-            let sid = name_str.strip_prefix("status-").unwrap().strip_suffix(".json").unwrap().to_string();
-            let lock_file = pet_dir.join(format!("pet-{}.lock", sid));
-            if is_lock_alive(&lock_file) {
-                continue; // already has a running pet
+    let mut seen_ids = std::collections::HashSet::new();
+
+    let pi_pet_status_dir = default_pi_pet_dir().join("status");
+    let dirs = [pi_pet_status_dir, default_pet_dir()];
+
+    for pet_dir in &dirs {
+        let Ok(entries) = fs::read_dir(pet_dir) else { continue };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy().to_string();
+            if name_str.starts_with("status-") && name_str.ends_with(".json") {
+                let sid = name_str.strip_prefix("status-").unwrap().strip_suffix(".json").unwrap().to_string();
+                if !seen_ids.insert(sid.clone()) {
+                    continue;
+                }
+                let lock_file = pet_dir.join(format!("pet-{}.lock", sid));
+                if is_lock_alive(&lock_file) {
+                    continue; // already has a running pet
+                }
+                // Clean up dead lock file
+                if lock_file.exists() {
+                    let _ = fs::remove_file(&lock_file);
+                }
+                let status_path = entry.path();
+                let last_modified = status_path.metadata()
+                    .and_then(|m| m.modified())
+                    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64)
+                    .unwrap_or(0);
+                let (sname, state, detail) = if let Some(s) = read_status(&status_path) {
+                    (s.session_name, s.state, s.detail)
+                } else {
+                    (String::new(), "idle".to_string(), String::new())
+                };
+                sessions.push(SessionInfo {
+                    session_id: sid,
+                    session_name: sname,
+                    state,
+                    detail,
+                    status_file: status_path.to_string_lossy().to_string(),
+                    last_modified,
+                });
             }
-            // Clean up dead lock file
-            if lock_file.exists() {
-                let _ = fs::remove_file(&lock_file);
-            }
-            let status_path = entry.path();
-            let last_modified = status_path.metadata()
-                .and_then(|m| m.modified())
-                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64)
-                .unwrap_or(0);
-            let (sname, state, detail) = if let Some(s) = read_status(&status_path) {
-                (s.session_name, s.state, s.detail)
-            } else {
-                (String::new(), "idle".to_string(), String::new())
-            };
-            sessions.push(SessionInfo {
-                session_id: sid,
-                session_name: sname,
-                state,
-                detail,
-                status_file: status_path.to_string_lossy().to_string(),
-                last_modified,
-            });
         }
     }
     sessions
@@ -233,9 +344,19 @@ fn bind_session(
     if !is_safe_session_id(&session_id) {
         return Err("Invalid session ID".to_string());
     }
-    let pet_dir = default_pet_dir();
-    let status_file = pet_dir.join(format!("status-{}.json", session_id));
-    let lock_file = pet_dir.join(format!("pet-{}.lock", session_id));
+    let pi_pet_status = default_pi_pet_dir().join("status").join(format!("status-{}.json", session_id));
+    let legacy_status = default_pet_dir().join(format!("status-{}.json", session_id));
+
+    let status_file = if pi_pet_status.exists() {
+        pi_pet_status
+    } else if legacy_status.exists() {
+        legacy_status
+    } else {
+        pi_pet_status
+    };
+
+    let lock_dir = status_file.parent().unwrap_or(&default_pet_dir()).to_path_buf();
+    let lock_file = lock_dir.join(format!("pet-{}.lock", session_id));
 
     if is_lock_alive(&lock_file) {
         return Err("Session already has a running pet".to_string());
@@ -255,7 +376,8 @@ fn bind_session(
     // Start file watcher in a background thread. Both files live in the same
     // directory, so one watcher can service the bound status and reaction.
     let watch_path = status_file.clone();
-    let reaction_path = pet_dir.join(format!("reaction-{}.json", session_id));
+    let reaction_path = default_pet_dir().join(format!("reaction-{}.json", session_id));
+    let event_path = resolve_event_path(&watch_path, &session_id);
     let log_path = status_file.clone();
     let bound_session_state = session_id_state.inner().clone();
     let bound_session = session_id.clone();
@@ -269,16 +391,30 @@ fn bind_session(
                 return;
             }
         };
-        let watch_dir = match watch_path.parent() {
-            Some(p) => p.to_path_buf(),
-            None => return,
-        };
-        let _ = fs::create_dir_all(&watch_dir);
-        if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
-            debug_log(&log_path, &format!("FATAL: watch() failed: {}", e));
-            return;
+        let mut watched_dirs = std::collections::HashSet::new();
+        if let Some(p) = watch_path.parent() {
+            let _ = fs::create_dir_all(p);
+            if watched_dirs.insert(p.to_path_buf()) {
+                let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+            }
         }
-        debug_log(&log_path, &format!("Watcher started on {:?} (bind_session)", watch_dir));
+        if let Some(p) = event_path.parent() {
+            let _ = fs::create_dir_all(p);
+            if watched_dirs.insert(p.to_path_buf()) {
+                let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+            }
+        }
+        if let Some(p) = reaction_path.parent() {
+            let _ = fs::create_dir_all(p);
+            if watched_dirs.insert(p.to_path_buf()) {
+                let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+            }
+        }
+        debug_log(&log_path, &format!("Watcher started on {:?} (bind_session)", watched_dirs));
+
+        if let Some(event) = read_pet_event(&event_path, &log_path) {
+            let _ = handle.emit("pet-event", event);
+        }
 
         for event in rx {
             if let Ok(event) = event {
@@ -288,8 +424,9 @@ fn bind_session(
                     continue;
                 }
                 let is_status_file = event.paths.iter().any(|p| *p == watch_path);
+                let is_event_file = event.paths.iter().any(|p| *p == event_path);
                 let is_reaction_file = event.paths.iter().any(|p| *p == reaction_path);
-                if !is_status_file && !is_reaction_file { continue; }
+                if !is_status_file && !is_event_file && !is_reaction_file { continue; }
                 debug_log(&log_path, &format!("bind_session event: {:?}, paths: {:?}", event.kind, event.paths));
                 match event.kind {
                     EventKind::Modify(_) | EventKind::Create(_) => {
@@ -297,13 +434,19 @@ fn bind_session(
                         if *bound_session_state.lock().unwrap() != bound_session {
                             continue;
                         }
-                        if is_reaction_file {
+                        if is_event_file {
+                            if let Some(pet_event) = read_pet_event(&event_path, &log_path) {
+                                let _ = handle.emit("pet-event", pet_event);
+                            }
+                        } else if is_reaction_file {
                             if let Some(reaction) = read_reaction(&reaction_path, &log_path) {
                                 let _ = handle.emit("reaction-event", reaction);
                             }
-                        } else if let Some(status) = read_status(&watch_path) {
-                            debug_log(&log_path, &format!("bind_session emit: state={}, detail={}", status.state, status.detail));
-                            let _ = handle.emit("status-update", status);
+                        } else if is_status_file {
+                            if let Some(status) = read_status(&watch_path) {
+                                debug_log(&log_path, &format!("bind_session emit: state={}, detail={}", status.state, status.detail));
+                                let _ = handle.emit("status-update", status);
+                            }
                         }
                     }
                     EventKind::Remove(_) if is_status_file => {
@@ -1009,8 +1152,14 @@ pub fn run() {
 
     // Determine if we have an explicit session or need session selection
     let (initial_status_path, initial_session_id, initial_lock) = if let Some(sf) = &explicit_status {
-        let sid = explicit_session.clone().unwrap_or_else(|| "unknown".to_string());
-        let pet_dir = default_pet_dir();
+        let sid = explicit_session.clone().unwrap_or_else(|| {
+            sf.file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.strip_prefix("status-"))
+                .unwrap_or("unknown")
+                .to_string()
+        });
+        let pet_dir = sf.parent().map(PathBuf::from).unwrap_or_else(default_pet_dir);
         let _ = fs::create_dir_all(&pet_dir);
         let lock_file = pet_dir.join(format!("pet-{}.lock", sid));
         if is_lock_alive(&lock_file) {
@@ -1057,7 +1206,7 @@ pub fn run() {
         .manage(session_id_shared)
         .manage(lock_path_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets])
+        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
@@ -1068,10 +1217,10 @@ pub fn run() {
             }
 
             // Set WebView2 background to transparent
-            let _ = window.with_webview(|webview| {
+            let _ = window.with_webview(|_webview| {
                 #[cfg(windows)]
                 {
-                    let controller = webview.controller();
+                    let controller = _webview.controller();
                     unsafe {
                         use webview2_com::Microsoft::Web::WebView2::Win32::*;
                         let controller2: ICoreWebView2Controller2 =
@@ -1125,6 +1274,7 @@ pub fn run() {
                 // Explicit session mode: watch the status and reaction files directly
                 let watch_path = initial_status_path.clone();
                 let reaction_path = default_pet_dir().join(format!("reaction-{}.json", initial_session_id));
+                let event_path = resolve_event_path(&watch_path, &initial_session_id);
                 let log_path = initial_status_path.clone();
                 std::thread::spawn(move || {
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -1136,38 +1286,54 @@ pub fn run() {
                     }
                 };
 
-                let watch_dir = match watch_path.parent() {
-                    Some(p) => p.to_path_buf(),
-                    None => {
-                        debug_log(&log_path, "FATAL: status path has no parent dir");
-                        return;
+                let mut watched_dirs = std::collections::HashSet::new();
+                if let Some(p) = watch_path.parent() {
+                    let _ = fs::create_dir_all(p);
+                    if watched_dirs.insert(p.to_path_buf()) {
+                        let _ = watcher.watch(p, RecursiveMode::NonRecursive);
                     }
-                };
-                let _ = fs::create_dir_all(&watch_dir);
-                if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
-                    debug_log(&log_path, &format!("FATAL: watch() failed: {}", e));
-                    return;
+                }
+                if let Some(p) = event_path.parent() {
+                    let _ = fs::create_dir_all(p);
+                    if watched_dirs.insert(p.to_path_buf()) {
+                        let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+                    }
+                }
+                if let Some(p) = reaction_path.parent() {
+                    let _ = fs::create_dir_all(p);
+                    if watched_dirs.insert(p.to_path_buf()) {
+                        let _ = watcher.watch(p, RecursiveMode::NonRecursive);
+                    }
                 }
 
-                debug_log(&log_path, &format!("Watcher started on {:?}", watch_dir));
+                debug_log(&log_path, &format!("Watcher started on {:?}", watched_dirs));
 
                 if let Some(status) = read_status(&watch_path) {
                     debug_log(&log_path, &format!("Initial status: state={}", status.state));
                     let _ = handle.emit("status-update", status);
                 }
+                if let Some(event) = read_pet_event(&event_path, &log_path) {
+                    debug_log(&log_path, &format!("Initial pet event: id={}", event.event_id));
+                    let _ = handle.emit("pet-event", event);
+                }
 
                 for event in rx {
                     if let Ok(event) = event {
                         let is_status_file = event.paths.iter().any(|p| *p == watch_path);
+                        let is_event_file = event.paths.iter().any(|p| *p == event_path);
                         let is_reaction_file = event.paths.iter().any(|p| *p == reaction_path);
-                        if !is_status_file && !is_reaction_file {
+                        if !is_status_file && !is_event_file && !is_reaction_file {
                             continue;
                         }
                         debug_log(&log_path, &format!("Event: {:?}, paths: {:?}", event.kind, event.paths));
                         match event.kind {
                             EventKind::Modify(_) | EventKind::Create(_) => {
                                 std::thread::sleep(std::time::Duration::from_millis(50));
-                                if is_reaction_file {
+                                if is_event_file {
+                                    if let Some(pet_event) = read_pet_event(&event_path, &log_path) {
+                                        let _ = handle.emit("pet-event", pet_event);
+                                    }
+                                } else if is_reaction_file {
                                     if let Some(reaction) = read_reaction(&reaction_path, &log_path) {
                                         let _ = handle.emit("reaction-event", reaction);
                                     }

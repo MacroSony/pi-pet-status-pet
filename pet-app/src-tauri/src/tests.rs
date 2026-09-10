@@ -415,6 +415,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // ── PetEvent tests (Phase B) ──
+
+    #[test]
+    fn test_read_pet_event_valid() {
+        let dir = std::env::temp_dir().join(format!("pet-event-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let event_file = dir.join("event-pet_test123.json");
+        let log_file = dir.join("pet-debug.log");
+
+        let event_json = serde_json::json!({
+            "schemaVersion": "1",
+            "eventId": "cmd_01HZX8E9A2B4C5D6E7F8G9H0JK",
+            "petId": "pet_test123",
+            "kind": "expression",
+            "payload": {
+                "text": "Done.",
+                "emotion": "happy",
+                "speak": false,
+                "priority": 3,
+                "durationMs": 3000
+            },
+            "createdAtMs": 1757419200000u64,
+            "expiresAtMs": crate::timestamp_millis() + 60000
+        });
+
+        std::fs::write(&event_file, event_json.to_string()).unwrap();
+
+        let parsed = crate::read_pet_event(&event_file, &log_file).expect("should parse valid pet event");
+        assert_eq!(parsed.schema_version, "1");
+        assert_eq!(parsed.event_id, "cmd_01HZX8E9A2B4C5D6E7F8G9H0JK");
+        assert_eq!(parsed.pet_id, "pet_test123");
+        assert_eq!(parsed.kind, "expression");
+        assert_eq!(parsed.payload.text.as_deref(), Some("Done."));
+        assert_eq!(parsed.payload.emotion.as_deref(), Some("happy"));
+        assert_eq!(parsed.payload.duration_ms, Some(3000));
+        assert_eq!(parsed.payload.priority, Some(3));
+        assert_eq!(parsed.payload.speak, Some(false));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_read_pet_event_expired_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("pet-event-exp-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let event_file = dir.join("event-pet_expired.json");
+        let log_file = dir.join("pet-debug.log");
+
+        let event_json = serde_json::json!({
+            "schemaVersion": "1",
+            "eventId": "cmd_expired",
+            "petId": "pet_expired",
+            "kind": "expression",
+            "payload": {
+                "text": "Too late"
+            },
+            "createdAtMs": 1000u64,
+            "expiresAtMs": 2000u64 // in the past
+        });
+
+        std::fs::write(&event_file, event_json.to_string()).unwrap();
+
+        let parsed = crate::read_pet_event(&event_file, &log_file);
+        assert!(parsed.is_none(), "expired event must be ignored");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_read_pet_event_malformed_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("pet-event-bad-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let event_file = dir.join("event-pet_bad.json");
+        let log_file = dir.join("pet-debug.log");
+
+        std::fs::write(&event_file, "not json!").unwrap();
+        let parsed = crate::read_pet_event(&event_file, &log_file);
+        assert!(parsed.is_none(), "malformed event must be ignored");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_resolve_event_path() {
+        let status_path = std::path::PathBuf::from("/home/user/.pi-pet/status/status-pet_abc.json");
+        let event_path = crate::resolve_event_path(&status_path, "pet_abc");
+        assert_eq!(
+            event_path,
+            std::path::PathBuf::from("/home/user/.pi-pet/events/event-pet_abc.json")
+        );
+    }
+
     // ── Helper ──
 
     fn make_stdin(
