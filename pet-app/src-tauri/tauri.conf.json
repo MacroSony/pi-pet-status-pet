@@ -21,6 +21,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "acceptFirstMouse": true,
+        "focus": false,
         "x": 1600,
         "y": 800
       }
