@@ -913,6 +913,178 @@ fn is_safe_session_id(id: &str) -> bool {
     !id.is_empty() && !id.contains('/') && !id.contains('\\') && !id.contains("..")
 }
 
+fn is_safe_request_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_safe_pet_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && is_safe_session_id(id)
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn is_valid_message_text(text: &str) -> bool {
+    let len = text.encode_utf16().count();
+    !text.trim().is_empty() && len <= 2000
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PetInboxPayload {
+    schema_version: String,
+    kind: String,
+    pet_id: String,
+    text: String,
+    deliver_as: String,
+    command_id: String,
+    dedup_key: String,
+    ttl_ms: u64,
+}
+
+fn create_pet_inbox_payload(
+    pet_id: &str,
+    text: &str,
+    request_id: &str,
+) -> Result<PetInboxPayload, String> {
+    if !is_safe_pet_id(pet_id) {
+        return Err("Unbound or invalid pet identity".to_string());
+    }
+    if !is_safe_request_id(request_id) {
+        return Err("Invalid request ID".to_string());
+    }
+    if !is_valid_message_text(text) {
+        return Err("Message text must be between 1 and 2000 characters".to_string());
+    }
+
+    Ok(PetInboxPayload {
+        schema_version: "1".to_string(),
+        kind: "user_message".to_string(),
+        pet_id: pet_id.to_string(),
+        text: text.to_string(),
+        deliver_as: "followUp".to_string(),
+        command_id: request_id.to_string(),
+        dedup_key: request_id.to_string(),
+        ttl_ms: 60000,
+    })
+}
+
+fn parse_runtime_port_from_str(content: &str) -> Result<u16, String> {
+    let v: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| format!("Invalid runtime.json: {}", e))?;
+
+    let app = v.get("app").and_then(|a| a.as_str()).unwrap_or("");
+    if app != "clawd-on-desk" {
+        return Err(format!("Unsupported runtime app: expected 'clawd-on-desk', got '{}'", app));
+    }
+
+    let port = v.get("port")
+        .and_then(|p| p.as_u64())
+        .ok_or_else(|| "Missing or invalid port in runtime.json".to_string())?;
+
+    if port == 0 || port > 65535 {
+        return Err(format!("Invalid port range: {}", port));
+    }
+
+    Ok(port as u16)
+}
+
+fn default_runtime_config_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("CLAWD_RUNTIME_CONFIG").map(PathBuf::from) {
+        return path;
+    }
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".clawd").join("runtime.json")
+}
+
+fn read_runtime_port(path: &PathBuf) -> Result<u16, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read runtime config from {}: {}", path.display(), e))?;
+    parse_runtime_port_from_str(&content)
+}
+
+fn verify_clawd_server_header(header: Option<&str>) -> Result<(), String> {
+    match header {
+        Some(val) if val.trim() == "clawd-on-desk" => Ok(()),
+        Some(val) => Err(format!(
+            "Untrusted server response: expected x-clawd-server header 'clawd-on-desk', got '{}'",
+            val
+        )),
+        None => Err("Untrusted server response: missing x-clawd-server header".to_string()),
+    }
+}
+
+fn post_pet_inbox_blocking(
+    port: u16,
+    payload: &PetInboxPayload,
+) -> Result<serde_json::Value, String> {
+    use std::io::Read;
+    let url = format!("http://127.0.0.1:{}/pet-inbox", port);
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+
+    let resp = agent
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .send(&json_bytes[..])
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    let server_header = resp
+        .headers()
+        .get("x-clawd-server")
+        .and_then(|v| v.to_str().ok());
+    verify_clawd_server_header(server_header)?;
+
+    let mut body_bytes = Vec::new();
+    resp.into_body()
+        .into_reader()
+        .take(65537)
+        .read_to_end(&mut body_bytes)
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    if body_bytes.len() > 65536 {
+        return Err("Response body exceeded 65536 bytes limit".to_string());
+    }
+
+    serde_json::from_slice::<serde_json::Value>(&body_bytes)
+        .map_err(|e| format!("Failed to parse response JSON: {}", e))
+}
+
+#[tauri::command]
+async fn send_session_message(
+    session_id_state: tauri::State<'_, Arc<Mutex<String>>>,
+    text: String,
+    request_id: String,
+) -> Result<serde_json::Value, String> {
+    let pet_id = {
+        let guard = session_id_state.lock().unwrap();
+        guard.clone()
+    };
+
+    if pet_id.is_empty() {
+        return Err("Pet session is not bound".to_string());
+    }
+
+    let payload = create_pet_inbox_payload(&pet_id, &text, &request_id)?;
+    let runtime_path = default_runtime_config_path();
+    let port = read_runtime_port(&runtime_path)?;
+
+    tauri::async_runtime::spawn_blocking(move || post_pet_inbox_blocking(port, &payload))
+        .await
+        .map_err(|e| format!("Async task failed: {}", e))?
+}
+
 fn write_lock_file(lock_path: &PathBuf) {
     let _ = fs::write(lock_path, std::process::id().to_string());
 }
@@ -1206,7 +1378,7 @@ pub fn run() {
         .manage(session_id_shared)
         .manage(lock_path_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets])
+        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 

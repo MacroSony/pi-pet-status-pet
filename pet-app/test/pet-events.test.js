@@ -6,6 +6,10 @@ const {
   VALID_EMOTIONS,
   DEFAULT_DURATION_MS,
   DEFAULT_PRIORITY,
+  isSafeRequestId,
+  generateRequestId,
+  validateUserMessageText,
+  createRequestIdTracker,
   parsePetEvent,
   parseLegacyReaction,
   createEventDedupTracker,
@@ -307,5 +311,168 @@ describe("createEventDedupTracker - watermark deduplication", () => {
     const commandIdB = "cmd_shared_02";
     assert.strictEqual(tracker.remember(commandIdB), true, "First legacy reaction must play");
     assert.strictEqual(tracker.remember(commandIdB), false, "Subsequent PetEvent must be dropped");
+  });
+});
+
+describe("isSafeRequestId and generateRequestId - request ID validation", () => {
+  it("accepts valid alphanumeric request IDs with dashes and underscores", () => {
+    assert.strictEqual(isSafeRequestId("req_12345"), true);
+    assert.strictEqual(isSafeRequestId("cmd-01-ABC"), true);
+    assert.strictEqual(isSafeRequestId("a"), true);
+    assert.strictEqual(isSafeRequestId("x".repeat(64)), true);
+  });
+
+  it("rejects invalid request IDs", () => {
+    assert.strictEqual(isSafeRequestId(""), false);
+    assert.strictEqual(isSafeRequestId("x".repeat(65)), false);
+    assert.strictEqual(isSafeRequestId("req/123"), false);
+    assert.strictEqual(isSafeRequestId("req\\123"), false);
+    assert.strictEqual(isSafeRequestId(".."), false);
+    assert.strictEqual(isSafeRequestId("req 123"), false);
+    assert.strictEqual(isSafeRequestId("req@123"), false);
+    assert.strictEqual(isSafeRequestId(null), false);
+    assert.strictEqual(isSafeRequestId(undefined), false);
+  });
+
+  it("generates valid safe request IDs", () => {
+    for (let i = 0; i < 50; i++) {
+      const id = generateRequestId();
+      assert.strictEqual(isSafeRequestId(id), true);
+      assert.ok(id.startsWith("req_"));
+      assert.ok(id.length <= 64);
+    }
+  });
+
+  it("uses injected crypto.randomUUID when provided", () => {
+    const mockCrypto = {
+      randomUUID: () => "550e8400-e29b-41d4-a716-446655440000",
+    };
+    const id = generateRequestId(mockCrypto);
+    assert.strictEqual(id, "req_550e8400-e29b-41d4-a716-446655440000");
+    assert.strictEqual(isSafeRequestId(id), true);
+    assert.ok(id.length <= 64);
+  });
+
+  it("sanitizes injected crypto.randomUUID characters to safe set", () => {
+    const mockCrypto = {
+      randomUUID: () => "uuid/123\\test..@#$%-ABC_456",
+    };
+    const id = generateRequestId(mockCrypto);
+    assert.strictEqual(id, "req_uuid123test-ABC_456");
+    assert.strictEqual(isSafeRequestId(id), true);
+    assert.ok(id.length <= 64);
+  });
+
+  it("truncates excessively long UUIDs to 64 chars total", () => {
+    const mockCrypto = {
+      randomUUID: () => "a".repeat(100),
+    };
+    const id = generateRequestId(mockCrypto);
+    assert.strictEqual(id, "req_" + "a".repeat(60));
+    assert.strictEqual(id.length, 64);
+    assert.strictEqual(isSafeRequestId(id), true);
+  });
+
+  it("falls back to timestamp+random when crypto throws or returns non-sanitizable text", () => {
+    const throwingCrypto = {
+      randomUUID: () => {
+        throw new Error("Entropy error");
+      },
+    };
+    const idA = generateRequestId(throwingCrypto);
+    assert.strictEqual(isSafeRequestId(idA), true);
+    assert.ok(idA.startsWith("req_"));
+    assert.ok(idA.length <= 64);
+
+    const emptySanitizedCrypto = {
+      randomUUID: () => "!!!@@@###$$$",
+    };
+    const idB = generateRequestId(emptySanitizedCrypto);
+    assert.strictEqual(isSafeRequestId(idB), true);
+    assert.ok(idB.startsWith("req_"));
+  });
+
+  it("falls back to timestamp+random when crypto is absent without mutating production global state", () => {
+    // Test injected empty crypto object
+    const idFromEmptyCrypto = generateRequestId({});
+    assert.strictEqual(isSafeRequestId(idFromEmptyCrypto), true);
+    assert.ok(idFromEmptyCrypto.startsWith("req_"));
+
+    // Safely test global crypto absence and restore immediately
+    const origDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    try {
+      Object.defineProperty(globalThis, "crypto", {
+        value: undefined,
+        configurable: true,
+        writable: true,
+      });
+      const id = generateRequestId();
+      assert.strictEqual(isSafeRequestId(id), true);
+      assert.ok(id.startsWith("req_"));
+      assert.ok(id.length <= 64);
+    } finally {
+      if (origDescriptor) {
+        Object.defineProperty(globalThis, "crypto", origDescriptor);
+      } else {
+        delete globalThis.crypto;
+      }
+    }
+  });
+});
+
+describe("validateUserMessageText", () => {
+  it("accepts valid non-empty message within 2000 chars", () => {
+    assert.strictEqual(validateUserMessageText("Hello world").ok, true);
+    assert.strictEqual(validateUserMessageText("a".repeat(2000)).ok, true);
+  });
+
+  it("rejects empty or whitespace-only messages", () => {
+    assert.strictEqual(validateUserMessageText("").ok, false);
+    assert.strictEqual(validateUserMessageText("   ").ok, false);
+    assert.strictEqual(validateUserMessageText("\n\t").ok, false);
+  });
+
+  it("rejects messages exceeding 2000 characters", () => {
+    assert.strictEqual(validateUserMessageText("a".repeat(2001)).ok, false);
+  });
+
+  it("rejects non-string values", () => {
+    assert.strictEqual(validateUserMessageText(null).ok, false);
+    assert.strictEqual(validateUserMessageText(1234).ok, false);
+    assert.strictEqual(validateUserMessageText({}).ok, false);
+  });
+});
+
+describe("createRequestIdTracker - request ID retry retention", () => {
+  function createTracker() {
+    let sequence = 0;
+    return createRequestIdTracker({ randomUUID: () => `uuid-${++sequence}` });
+  }
+
+  it("reuses the request ID while the raw message is unchanged", () => {
+    const tracker = createTracker();
+    const first = tracker.getRequestId("same text");
+
+    assert.strictEqual(first, "req_uuid-1");
+    assert.strictEqual(tracker.getRequestId("same text"), first);
+  });
+
+  it("generates a new request ID after the message changes", () => {
+    const tracker = createTracker();
+    const first = tracker.getRequestId("first draft");
+    const second = tracker.getRequestId("edited draft");
+
+    assert.strictEqual(first, "req_uuid-1");
+    assert.strictEqual(second, "req_uuid-2");
+    assert.strictEqual(tracker.getRequestId("edited draft"), second);
+  });
+
+  it("generates a new request ID after reset", () => {
+    const tracker = createTracker();
+    const first = tracker.getRequestId("same text");
+    tracker.reset();
+
+    assert.strictEqual(tracker.getRequestId("same text"), "req_uuid-2");
+    assert.strictEqual(isSafeRequestId(first), true);
   });
 });

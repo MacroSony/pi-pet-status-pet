@@ -1323,6 +1323,10 @@ function updateStatus(status, isRealEvent = false) {
     sessionNameEl.title = sessionName;
   }
 
+  if (status.session_id && !boundSessionId) {
+    boundSessionId = status.session_id;
+  }
+
   const previousBusinessState = currentBusinessState;
   const stateChanged = (state !== previousBusinessState);
   currentBusinessState = state;
@@ -1489,11 +1493,38 @@ function addChoiceRow(parent, label, value, choices, onchange) {
   parent.appendChild(row);
 }
 
+function showTransientBubble(msg, durationMs = 4000) {
+  clearTimeout(bubbleTimeout);
+  statusText.textContent = msg;
+  container.dataset.bubbleVisible = 'true';
+  bubble.classList.remove('hidden');
+  bubbleTimeout = setTimeout(() => {
+    bubbleTimeout = null;
+    const state = currentBusinessState;
+    const detail = latestStatus ? latestStatus.detail : '';
+    if (shouldShowBubble(state) && (detail || state === 'offline')) {
+      statusText.textContent = detail || 'Zzz...';
+      bubble.classList.remove('hidden');
+      container.dataset.bubbleVisible = 'true';
+    } else {
+      bubble.classList.add('hidden');
+      container.dataset.bubbleVisible = 'false';
+    }
+  }, durationMs);
+}
+
 function buildMenu() {
   charMenu.innerHTML = '';
+  if (menuPage === 'message') { buildMessagePage(); return; }
   if (menuPage === 'config') { buildConfigPage(); return; }
   if (menuPage === 'ascii') { buildAsciiPage(); return; }
   if (menuPage === 'dlc') { buildDlcPage(); return; }
+
+  // Message session (only when boundSessionId exists)
+  if (boundSessionId) {
+    addMenuItem(charMenu, 'Message session…', () => { menuPage = 'message'; buildMenu(); });
+    addDivider(charMenu);
+  }
 
   // Bundled: Ferris
   addMenuItem(charMenu, 'Ferris (SVG)', () => selectChar('ferris'), mode === 'ferris' ? 'active' : '');
@@ -1546,6 +1577,157 @@ function buildMenu() {
     sidLabel.title = boundSessionId;
     charMenu.appendChild(sidLabel);
   }
+}
+
+function buildMessagePage() {
+  addMenuItem(charMenu, '← Back', () => {
+    menuPage = 'main';
+    buildMenu();
+  });
+  addDivider(charMenu);
+
+  const msgContainer = document.createElement('div');
+  msgContainer.className = 'menu-message-container';
+
+  const textarea = document.createElement('textarea');
+  textarea.className = 'menu-message-textarea';
+  textarea.maxLength = 2000;
+  textarea.placeholder = 'Message session…';
+  textarea.spellcheck = false;
+
+  const errorEl = document.createElement('div');
+  errorEl.className = 'menu-message-error';
+  errorEl.style.display = 'none';
+
+  const buttonsRow = document.createElement('div');
+  buttonsRow.className = 'menu-message-buttons';
+
+  const backBtn = document.createElement('button');
+  backBtn.type = 'button';
+  backBtn.className = 'menu-message-btn';
+  backBtn.textContent = 'Back';
+  backBtn.onclick = (e) => {
+    e.stopPropagation();
+    menuPage = 'main';
+    buildMenu();
+  };
+
+  const sendBtn = document.createElement('button');
+  sendBtn.type = 'button';
+  sendBtn.className = 'menu-message-btn menu-message-btn-primary';
+  sendBtn.textContent = 'Send';
+
+  const requestIdTracker = (typeof PetEvents !== 'undefined' && PetEvents.createRequestIdTracker)
+    ? PetEvents.createRequestIdTracker()
+    : null;
+
+  async function handleSend() {
+    const rawText = textarea.value;
+    if (typeof PetEvents !== 'undefined' && PetEvents.validateUserMessageText) {
+      const validation = PetEvents.validateUserMessageText(rawText);
+      if (!validation.ok) {
+        if (!rawText.trim()) {
+          textarea.focus();
+          return;
+        }
+        errorEl.textContent = validation.reason;
+        errorEl.style.display = 'block';
+        return;
+      }
+    } else {
+      const text = rawText.trim();
+      if (!text) {
+        textarea.focus();
+        return;
+      }
+      if (rawText.length > 2000) {
+        errorEl.textContent = 'Message text must not exceed 2000 characters';
+        errorEl.style.display = 'block';
+        return;
+      }
+    }
+
+    sendBtn.disabled = true;
+    backBtn.disabled = true;
+    textarea.disabled = true;
+    sendBtn.textContent = 'Sending…';
+    errorEl.style.display = 'none';
+    errorEl.textContent = '';
+
+    const requestId = requestIdTracker
+      ? requestIdTracker.getRequestId(rawText)
+      : ((typeof PetEvents !== 'undefined' && PetEvents.generateRequestId)
+          ? PetEvents.generateRequestId()
+          : `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`);
+
+    try {
+      if (!window.__TAURI__) {
+        throw new Error('Tauri environment unavailable');
+      }
+
+      const res = await window.__TAURI__.core.invoke('send_session_message', {
+        text: rawText,
+        requestId,
+      });
+
+      if (res && (res.status === 'queued' || res.status === 'dispatched')) {
+        if (requestIdTracker) {
+          requestIdTracker.reset();
+        }
+        closeMenu();
+        if (res.status === 'dispatched') {
+          showTransientBubble('Message already dispatched');
+        } else {
+          showTransientBubble('Message queued');
+        }
+      } else {
+        const errMsg = (res && (res.reason || res.error || res.status)) || 'Failed to send message';
+        errorEl.textContent = String(errMsg);
+        errorEl.style.display = 'block';
+        sendBtn.disabled = false;
+        backBtn.disabled = false;
+        textarea.disabled = false;
+        sendBtn.textContent = 'Send';
+        textarea.focus();
+      }
+    } catch (err) {
+      const errMsg = typeof err === 'string' ? err : (err && err.message ? err.message : String(err));
+      errorEl.textContent = String(errMsg);
+      errorEl.style.display = 'block';
+      sendBtn.disabled = false;
+      backBtn.disabled = false;
+      textarea.disabled = false;
+      sendBtn.textContent = 'Send';
+      textarea.focus();
+    }
+  }
+
+  sendBtn.onclick = (e) => {
+    e.stopPropagation();
+    handleSend();
+  };
+
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleSend();
+    }
+  });
+
+  textarea.addEventListener('click', (e) => e.stopPropagation());
+  textarea.addEventListener('mousedown', (e) => e.stopPropagation());
+
+  buttonsRow.appendChild(backBtn);
+  buttonsRow.appendChild(sendBtn);
+
+  msgContainer.appendChild(textarea);
+  msgContainer.appendChild(errorEl);
+  msgContainer.appendChild(buttonsRow);
+
+  charMenu.appendChild(msgContainer);
+
+  setTimeout(() => textarea.focus(), 20);
 }
 
 function buildAsciiPage() {

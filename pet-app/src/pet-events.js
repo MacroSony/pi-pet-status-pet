@@ -186,11 +186,67 @@
     };
   }
 
+  function isSafeRequestId(id) {
+    return typeof id === 'string' && id.length > 0 && id.length <= 64 && /^[A-Za-z0-9_-]+$/.test(id);
+  }
+
+  function generateRequestId(customCrypto) {
+    try {
+      const cryptoObj = customCrypto
+        || (typeof globalThis !== 'undefined' ? globalThis.crypto : (typeof crypto !== 'undefined' ? crypto : null));
+      if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+        const raw = String(cryptoObj.randomUUID());
+        const sanitized = raw.replace(/[^A-Za-z0-9_-]/g, '');
+        if (sanitized) {
+          const candidate = `req_${sanitized}`;
+          return candidate.length <= 64 ? candidate : candidate.slice(0, 64);
+        }
+      }
+    } catch (_) {
+      // Fall through to fallback generator
+    }
+    const rand = Math.random().toString(36).slice(2, 10);
+    return `req_${Date.now().toString(36)}_${rand}`;
+  }
+
+  function validateUserMessageText(text) {
+    if (typeof text !== 'string') return { ok: false, reason: 'text must be a string' };
+    const trimmed = text.trim();
+    if (!trimmed) return { ok: false, reason: 'text cannot be empty' };
+    if (text.length > 2000) return { ok: false, reason: 'text must not exceed 2000 characters' };
+    return { ok: true, text };
+  }
+
+  function createRequestIdTracker(customCrypto) {
+    let currentId = null;
+    let currentText = null;
+
+    function getRequestId(rawText) {
+      if (typeof rawText === 'string' && currentId && currentText === rawText) {
+        return currentId;
+      }
+      currentText = typeof rawText === 'string' ? rawText : null;
+      currentId = generateRequestId(customCrypto);
+      return currentId;
+    }
+
+    function reset() {
+      currentId = null;
+      currentText = null;
+    }
+
+    return { getRequestId, reset };
+  }
+
   return {
     VALID_EMOTIONS,
     DEFAULT_DURATION_MS,
     DEFAULT_PRIORITY,
     isSafeId,
+    isSafeRequestId,
+    generateRequestId,
+    validateUserMessageText,
+    createRequestIdTracker,
     parsePetEvent,
     parseLegacyReaction,
     createEventDedupTracker,

@@ -507,6 +507,319 @@ mod tests {
         );
     }
 
+    // ── Runtime config parsing tests ──
+
+    #[test]
+    fn test_parse_runtime_port_valid() {
+        let json = r#"{"app":"clawd-on-desk","port":23333,"ownerPid":1234}"#;
+        let port = crate::parse_runtime_port_from_str(json).unwrap();
+        assert_eq!(port, 23333);
+    }
+
+    #[test]
+    fn test_parse_runtime_port_app_mismatch() {
+        let json = r#"{"app":"other-service","port":23333}"#;
+        let err = crate::parse_runtime_port_from_str(json).unwrap_err();
+        assert!(err.contains("Unsupported runtime app"));
+    }
+
+    #[test]
+    fn test_parse_runtime_port_missing_port() {
+        let json = r#"{"app":"clawd-on-desk"}"#;
+        let err = crate::parse_runtime_port_from_str(json).unwrap_err();
+        assert!(err.contains("Missing or invalid port"));
+    }
+
+    #[test]
+    fn test_parse_runtime_port_invalid_port_range() {
+        let json = r#"{"app":"clawd-on-desk","port":0}"#;
+        assert!(crate::parse_runtime_port_from_str(json).is_err());
+
+        let json_overflow = r#"{"app":"clawd-on-desk","port":70000}"#;
+        assert!(crate::parse_runtime_port_from_str(json_overflow).is_err());
+    }
+
+    #[test]
+    fn test_parse_runtime_port_malformed_json() {
+        let json = r#"{"app":"clawd-on-desk", port: invalid}"#;
+        assert!(crate::parse_runtime_port_from_str(json).is_err());
+    }
+
+    // ── Server header validation tests ──
+
+    #[test]
+    fn test_verify_clawd_server_header_valid() {
+        assert!(crate::verify_clawd_server_header(Some("clawd-on-desk")).is_ok());
+        assert!(crate::verify_clawd_server_header(Some("  clawd-on-desk  ")).is_ok());
+    }
+
+    #[test]
+    fn test_verify_clawd_server_header_mismatch() {
+        let err = crate::verify_clawd_server_header(Some("rogue-server")).unwrap_err();
+        assert!(err.contains("Untrusted server response"));
+        assert!(err.contains("rogue-server"));
+    }
+
+    #[test]
+    fn test_verify_clawd_server_header_missing() {
+        let err = crate::verify_clawd_server_header(None).unwrap_err();
+        assert!(err.contains("missing x-clawd-server header"));
+    }
+
+    // ── Request ID safety tests ──
+
+    #[test]
+    fn test_is_safe_request_id_valid() {
+        assert!(crate::is_safe_request_id("req_123_abc"));
+        assert!(crate::is_safe_request_id("cmd-01-ABC"));
+        assert!(crate::is_safe_request_id("a"));
+        assert!(crate::is_safe_request_id(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn test_is_safe_request_id_invalid() {
+        assert!(!crate::is_safe_request_id(""));
+        assert!(!crate::is_safe_request_id(&"x".repeat(65)));
+        assert!(!crate::is_safe_request_id("req/123"));
+        assert!(!crate::is_safe_request_id("req\\123"));
+        assert!(!crate::is_safe_request_id(".."));
+        assert!(!crate::is_safe_request_id("req 123"));
+        assert!(!crate::is_safe_request_id("req@123"));
+        assert!(!crate::is_safe_request_id("req\n123"));
+    }
+
+    // ── Bound identity & payload validation tests ──
+
+    #[test]
+    fn test_is_safe_pet_id() {
+        assert!(crate::is_safe_pet_id("pet_123"));
+        assert!(crate::is_safe_pet_id("my-session-id"));
+        assert!(crate::is_safe_pet_id(&"a".repeat(128)));
+
+        assert!(!crate::is_safe_pet_id(""));
+        assert!(!crate::is_safe_pet_id(&"a".repeat(129)));
+        assert!(!crate::is_safe_pet_id("../etc/passwd"));
+        assert!(!crate::is_safe_pet_id("pet/123"));
+        assert!(!crate::is_safe_pet_id("pet\\123"));
+        assert!(!crate::is_safe_pet_id("pet 123"));
+    }
+
+    #[test]
+    fn test_create_pet_inbox_payload_valid() {
+        let payload = crate::create_pet_inbox_payload(
+            "pet_abc123",
+            "Hello pet, please check the status",
+            "req_uuid_001",
+        )
+        .unwrap();
+
+        assert_eq!(payload.schema_version, "1");
+        assert_eq!(payload.kind, "user_message");
+        assert_eq!(payload.pet_id, "pet_abc123");
+        assert_eq!(payload.text, "Hello pet, please check the status");
+        assert_eq!(payload.deliver_as, "followUp");
+        assert_eq!(payload.command_id, "req_uuid_001");
+        assert_eq!(payload.dedup_key, "req_uuid_001");
+        assert_eq!(payload.ttl_ms, 60000);
+
+        let serialized = serde_json::to_string(&payload).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["schemaVersion"], "1");
+        assert_eq!(value["kind"], "user_message");
+        assert_eq!(value["petId"], "pet_abc123");
+        assert_eq!(value["text"], "Hello pet, please check the status");
+        assert_eq!(value["deliverAs"], "followUp");
+        assert_eq!(value["commandId"], "req_uuid_001");
+        assert_eq!(value["dedupKey"], "req_uuid_001");
+        assert_eq!(value["ttlMs"], 60000);
+    }
+
+    #[test]
+    fn test_create_pet_inbox_payload_invalid_pet_id() {
+        let err = crate::create_pet_inbox_payload("", "hello", "req_1").unwrap_err();
+        assert!(err.contains("Unbound or invalid pet identity"));
+
+        let err2 = crate::create_pet_inbox_payload("bad/id", "hello", "req_1").unwrap_err();
+        assert!(err2.contains("Unbound or invalid pet identity"));
+    }
+
+    #[test]
+    fn test_create_pet_inbox_payload_invalid_text() {
+        let err_empty = crate::create_pet_inbox_payload("pet_1", "", "req_1").unwrap_err();
+        assert!(err_empty.contains("Message text must be between 1 and 2000 characters"));
+
+        let err_whitespace = crate::create_pet_inbox_payload("pet_1", "   \n\t  ", "req_1").unwrap_err();
+        assert!(err_whitespace.contains("Message text must be between 1 and 2000 characters"));
+
+        let long_text = "a".repeat(2001);
+        let err_too_long =
+            crate::create_pet_inbox_payload("pet_1", &long_text, "req_1").unwrap_err();
+        assert!(err_too_long.contains("Message text must be between 1 and 2000 characters"));
+
+        // Test UTF-16 code units: 1000 emojis (each is 2 UTF-16 code units = 2000) is valid
+        let emoji_valid = "🐶".repeat(1000);
+        assert!(crate::create_pet_inbox_payload("pet_1", &emoji_valid, "req_1").is_ok());
+
+        // 1001 emojis = 2002 UTF-16 code units is invalid
+        let emoji_invalid = "🐶".repeat(1001);
+        let err_emoji = crate::create_pet_inbox_payload("pet_1", &emoji_invalid, "req_1").unwrap_err();
+        assert!(err_emoji.contains("Message text must be between 1 and 2000 characters"));
+    }
+
+    #[test]
+    fn test_create_pet_inbox_payload_invalid_request_id() {
+        let err = crate::create_pet_inbox_payload("pet_1", "hello", "bad request id!").unwrap_err();
+        assert!(err.contains("Invalid request ID"));
+    }
+
+    // ── post_pet_inbox_blocking HTTP tests ──
+
+    #[test]
+    fn test_post_pet_inbox_blocking_http_422_receipt() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body = r#"{"status":"rejected","reason":"SessionOffline"}"#;
+            let response = format!(
+                "HTTP/1.1 422 Unprocessable Entity\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_inbox_payload("pet_test", "hello", "req_422").unwrap();
+        let receipt = crate::post_pet_inbox_blocking(port, &payload)
+            .expect("HTTP 422 with trusted header should parse receipt JSON");
+
+        assert_eq!(receipt["status"], "rejected");
+        assert_eq!(receipt["reason"], "SessionOffline");
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_inbox_blocking_missing_server_header_on_error_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body = r#"{"status":"rejected","reason":"SessionOffline"}"#;
+            let response = format!(
+                "HTTP/1.1 422 Unprocessable Entity\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_inbox_payload("pet_test", "hello", "req_missing").unwrap();
+        let result = crate::post_pet_inbox_blocking(port, &payload);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("missing x-clawd-server header"), "got: {}", err);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_inbox_blocking_untrusted_server_header_on_error_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body = r#"{"status":"rejected","reason":"SessionOffline"}"#;
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: rogue-service\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_inbox_payload("pet_test", "hello", "req_untrusted").unwrap();
+        let result = crate::post_pet_inbox_blocking(port, &payload);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Untrusted server response"), "got: {}", err);
+        assert!(err.contains("rogue-service"), "got: {}", err);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_inbox_blocking_transport_failure_remains_err() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // Closed port
+
+        let payload = crate::create_pet_inbox_payload("pet_test", "hello", "req_closed").unwrap();
+        let result = crate::post_pet_inbox_blocking(port, &payload);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("HTTP request failed"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_post_pet_inbox_blocking_size_capped_on_error_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let oversized_body = "{\"data\":\"".to_string() + &"x".repeat(70000) + "\"}";
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                oversized_body.len(),
+                oversized_body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_inbox_payload("pet_test", "hello", "req_oversized").unwrap();
+        let result = crate::post_pet_inbox_blocking(port, &payload);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Response body exceeded 65536 bytes limit"), "got: {}", err);
+
+        server.join().unwrap();
+    }
+
     // ── Helper ──
 
     fn make_stdin(
