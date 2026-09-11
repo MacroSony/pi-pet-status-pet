@@ -238,6 +238,189 @@
     return { getRequestId, reset };
   }
 
+  function formatReceiptBubble(receipt) {
+    if (receipt instanceof Error) {
+      return { terminal: false, status: 'error', text: 'Message queued' };
+    }
+    if (!receipt || typeof receipt !== 'object') {
+      return { terminal: true, status: 'failed', text: 'Message failed: invalid receipt' };
+    }
+
+    const rawStatus = receipt.status;
+    const status = typeof rawStatus === 'string'
+      ? rawStatus.trim().toLowerCase()
+      : (typeof rawStatus === 'number' ? String(rawStatus) : '');
+
+    const reason = typeof receipt.reason === 'string' ? receipt.reason.trim()
+      : (typeof receipt.error === 'string' ? receipt.error.trim() : '');
+
+    if (status === 'dispatched') {
+      return { terminal: true, status: 'dispatched', text: 'Message dispatched' };
+    }
+    if (status === 'queued') {
+      return { terminal: false, status: 'queued', text: 'Message queued' };
+    }
+    if (
+      status === 'not_found' ||
+      status === 'notfound' ||
+      status === 'not-found' ||
+      status === '404' ||
+      reason.toLowerCase() === 'not_found' ||
+      reason.toLowerCase() === 'not found' ||
+      reason.toLowerCase() === 'notfound'
+    ) {
+      return { terminal: false, status: 'not_found', text: 'Message queued' };
+    }
+    if (status === 'error' || status === 'transient_error' || status === 'transient') {
+      return { terminal: false, status: 'error', text: 'Message queued' };
+    }
+    if (status === 'timeout') {
+      return { terminal: true, status: 'timeout', text: 'Message dispatch status unknown' };
+    }
+    if (status === 'failed') {
+      return {
+        terminal: true,
+        status: 'failed',
+        text: reason ? `Message failed: ${reason}` : 'Message failed',
+      };
+    }
+    if (status === 'expired') {
+      return {
+        terminal: true,
+        status: 'expired',
+        text: reason ? `Message expired: ${reason}` : 'Message expired',
+      };
+    }
+    if (status === 'rejected') {
+      return {
+        terminal: true,
+        status: 'rejected',
+        text: reason ? `Message rejected: ${reason}` : 'Message rejected',
+      };
+    }
+
+    return {
+      terminal: true,
+      status: status || 'unknown',
+      text: reason ? `Message failed: ${reason}` : (status ? `Message status: ${status}` : 'Message status unknown'),
+    };
+  }
+
+  function createReceiptPoller(options = {}) {
+    const fetchReceipt = options.fetchReceipt;
+    const onStatus = options.onStatus;
+    const intervalMs = typeof options.intervalMs === 'number' && options.intervalMs > 0 ? options.intervalMs : 500;
+    const maxDurationMs = typeof options.maxDurationMs === 'number' && options.maxDurationMs > 0 ? options.maxDurationMs : 125000;
+    const timer = options.timer || {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      now: () => Date.now(),
+    };
+
+    let pollerRunId = 0;
+    let timerId = null;
+    let isStopped = false;
+
+    function stop() {
+      isStopped = true;
+      pollerRunId++;
+      if (timerId !== null) {
+        timer.clearTimeout(timerId);
+        timerId = null;
+      }
+    }
+
+    function start(startOptions = {}) {
+      stop();
+      isStopped = false;
+
+      const currentRunId = pollerRunId;
+      const requestId = typeof startOptions === 'string' ? startOptions : startOptions.requestId;
+      const generation = typeof startOptions === 'object' && typeof startOptions.generation === 'number'
+        ? startOptions.generation
+        : currentRunId;
+
+      if (!requestId || typeof requestId !== 'string') {
+        return { stop };
+      }
+
+      const startTime = timer.now();
+
+      async function tick() {
+        if (isStopped || pollerRunId !== currentRunId) {
+          return;
+        }
+
+        const elapsed = timer.now() - startTime;
+        if (elapsed >= maxDurationMs) {
+          if (onStatus) {
+            onStatus(
+              formatReceiptBubble({ status: 'timeout' }),
+              { requestId, generation, elapsed }
+            );
+          }
+          stop();
+          return;
+        }
+
+        try {
+          if (typeof fetchReceipt !== 'function') {
+            return;
+          }
+          const receipt = await fetchReceipt(requestId);
+          if (isStopped || pollerRunId !== currentRunId) {
+            return;
+          }
+
+          const formatted = formatReceiptBubble(receipt);
+          if (onStatus) {
+            onStatus(formatted, { requestId, generation, elapsed, raw: receipt });
+          }
+
+          if (formatted.terminal) {
+            stop();
+            return;
+          }
+        } catch (err) {
+          if (isStopped || pollerRunId !== currentRunId) {
+            return;
+          }
+          const formatted = formatReceiptBubble(err);
+          if (onStatus) {
+            onStatus(
+              formatted,
+              { requestId, generation, elapsed, error: err }
+            );
+          }
+        }
+
+        if (!isStopped && pollerRunId === currentRunId) {
+          const remaining = maxDurationMs - (timer.now() - startTime);
+          if (remaining > 0) {
+            const nextDelay = Math.min(intervalMs, remaining);
+            timerId = timer.setTimeout(tick, nextDelay);
+          } else {
+            if (onStatus) {
+              onStatus(
+                formatReceiptBubble({ status: 'timeout' }),
+                { requestId, generation, elapsed: timer.now() - startTime }
+              );
+            }
+            stop();
+          }
+        }
+      }
+
+      timerId = timer.setTimeout(tick, intervalMs);
+      return { stop };
+    }
+
+    return {
+      start,
+      stop,
+    };
+  }
+
   return {
     VALID_EMOTIONS,
     DEFAULT_DURATION_MS,
@@ -247,6 +430,8 @@
     generateRequestId,
     validateUserMessageText,
     createRequestIdTracker,
+    formatReceiptBubble,
+    createReceiptPoller,
     parsePetEvent,
     parseLegacyReaction,
     createEventDedupTracker,

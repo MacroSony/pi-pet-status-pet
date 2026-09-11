@@ -10,6 +10,8 @@ const {
   generateRequestId,
   validateUserMessageText,
   createRequestIdTracker,
+  formatReceiptBubble,
+  createReceiptPoller,
   parsePetEvent,
   parseLegacyReaction,
   createEventDedupTracker,
@@ -474,5 +476,318 @@ describe("createRequestIdTracker - request ID retry retention", () => {
 
     assert.strictEqual(tracker.getRequestId("same text"), "req_uuid-2");
     assert.strictEqual(isSafeRequestId(first), true);
+  });
+});
+
+describe("formatReceiptBubble - status and reason formatting", () => {
+  it("formats dispatched receipt correctly", () => {
+    const formatted = formatReceiptBubble({ status: "dispatched" });
+    assert.strictEqual(formatted.terminal, true);
+    assert.strictEqual(formatted.status, "dispatched");
+    assert.strictEqual(formatted.text, "Message dispatched");
+  });
+
+  it("formats queued receipt as non-terminal conservative bubble", () => {
+    const formatted = formatReceiptBubble({ status: "queued" });
+    assert.strictEqual(formatted.terminal, false);
+    assert.strictEqual(formatted.status, "queued");
+    assert.strictEqual(formatted.text, "Message queued");
+  });
+
+  it("formats not_found receipt as non-terminal conservative bubble to continue polling", () => {
+    const fromStatus = formatReceiptBubble({ status: "not_found" });
+    assert.strictEqual(fromStatus.terminal, false);
+    assert.strictEqual(fromStatus.status, "not_found");
+    assert.strictEqual(fromStatus.text, "Message queued");
+
+    const from404 = formatReceiptBubble({ status: 404 });
+    assert.strictEqual(from404.terminal, false);
+    assert.strictEqual(from404.status, "not_found");
+    assert.strictEqual(from404.text, "Message queued");
+
+    const fromReason = formatReceiptBubble({ status: "error", reason: "not_found" });
+    assert.strictEqual(fromReason.terminal, false);
+    assert.strictEqual(fromReason.status, "not_found");
+  });
+
+  it("formats transient query errors and Error instances as non-terminal", () => {
+    const fromStatus = formatReceiptBubble({ status: "error" });
+    assert.strictEqual(fromStatus.terminal, false);
+    assert.strictEqual(fromStatus.status, "error");
+    assert.strictEqual(fromStatus.text, "Message queued");
+
+    const fromErrorObj = formatReceiptBubble(new Error("Network timeout"));
+    assert.strictEqual(fromErrorObj.terminal, false);
+    assert.strictEqual(fromErrorObj.status, "error");
+    assert.strictEqual(fromErrorObj.text, "Message queued");
+  });
+
+  it("formats timeout receipt with conservative unknown dispatch text", () => {
+    const formatted = formatReceiptBubble({ status: "timeout" });
+    assert.strictEqual(formatted.terminal, true);
+    assert.strictEqual(formatted.status, "timeout");
+    assert.strictEqual(formatted.text, "Message dispatch status unknown");
+  });
+
+  it("formats terminal error statuses (failed, expired, rejected) with reasons without claiming completion", () => {
+    const failed = formatReceiptBubble({
+      status: "failed",
+      reason: "Claim expired: stale claimed item older than 60s (delivery-unknown)",
+    });
+    assert.strictEqual(failed.terminal, true);
+    assert.strictEqual(failed.status, "failed");
+    assert.strictEqual(failed.text, "Message failed: Claim expired: stale claimed item older than 60s (delivery-unknown)");
+
+    const expired = formatReceiptBubble({ status: "expired", reason: "Message expired before claim" });
+    assert.strictEqual(expired.terminal, true);
+    assert.strictEqual(expired.status, "expired");
+    assert.strictEqual(expired.text, "Message expired: Message expired before claim");
+
+    const rejected = formatReceiptBubble({ status: "rejected", reason: "SessionOffline" });
+    assert.strictEqual(rejected.terminal, true);
+    assert.strictEqual(rejected.status, "rejected");
+    assert.strictEqual(rejected.text, "Message rejected: SessionOffline");
+
+    const defaultFailed = formatReceiptBubble({ status: "failed" });
+    assert.strictEqual(defaultFailed.terminal, true);
+    assert.strictEqual(defaultFailed.text, "Message failed");
+  });
+
+  it("handles null or non-object receipt gracefully", () => {
+    const formattedNull = formatReceiptBubble(null);
+    assert.strictEqual(formattedNull.terminal, true);
+    assert.strictEqual(formattedNull.status, "failed");
+    assert.strictEqual(formattedNull.text, "Message failed: invalid receipt");
+
+    const formattedUndefined = formatReceiptBubble(undefined);
+    assert.strictEqual(formattedUndefined.terminal, true);
+  });
+});
+
+describe("createReceiptPoller - polling state machine and generation safety", () => {
+  function createMockTimer() {
+    let currentTime = 0;
+    let nextId = 1;
+    const timers = new Map();
+
+    return {
+      setTimeout(fn, ms) {
+        const id = nextId++;
+        timers.set(id, { fn, dueTime: currentTime + ms });
+        return id;
+      },
+      clearTimeout(id) {
+        timers.delete(id);
+      },
+      now() {
+        return currentTime;
+      },
+      async advance(ms) {
+        currentTime += ms;
+        const ready = [];
+        for (const [id, entry] of timers.entries()) {
+          if (entry.dueTime <= currentTime) {
+            ready.push({ id, fn: entry.fn });
+          }
+        }
+        for (const item of ready) {
+          timers.delete(item.id);
+          await item.fn();
+        }
+      },
+      pendingCount() {
+        return timers.size;
+      },
+    };
+  }
+
+  it("polls repeatedly through queued and not_found (404) and stops on terminal dispatched receipt", async () => {
+    const timer = createMockTimer();
+    const responses = [
+      { status: "queued" },
+      { status: "not_found" },
+      { status: "dispatched" },
+    ];
+    let fetchCount = 0;
+    const updates = [];
+
+    const poller = createReceiptPoller({
+      fetchReceipt: async (reqId) => {
+        fetchCount++;
+        return responses.shift();
+      },
+      onStatus: (result, ctx) => {
+        updates.push({ result, ctx });
+      },
+      intervalMs: 500,
+      maxDurationMs: 2500,
+      timer,
+    });
+
+    poller.start({ requestId: "req_001", generation: 1 });
+
+    assert.strictEqual(fetchCount, 0);
+    assert.strictEqual(timer.pendingCount(), 1);
+
+    // 1st tick at 500ms -> queued
+    await timer.advance(500);
+    assert.strictEqual(fetchCount, 1);
+    assert.strictEqual(updates.length, 1);
+    assert.strictEqual(updates[0].result.status, "queued");
+    assert.strictEqual(updates[0].result.terminal, false);
+    assert.strictEqual(timer.pendingCount(), 1);
+
+    // 2nd tick at 1000ms -> not_found (404/waiting) must continue polling
+    await timer.advance(500);
+    assert.strictEqual(fetchCount, 2);
+    assert.strictEqual(updates.length, 2);
+    assert.strictEqual(updates[1].result.status, "not_found");
+    assert.strictEqual(updates[1].result.terminal, false);
+    assert.strictEqual(timer.pendingCount(), 1);
+
+    // 3rd tick at 1500ms -> dispatched (terminal)
+    await timer.advance(500);
+    assert.strictEqual(fetchCount, 3);
+    assert.strictEqual(updates.length, 3);
+    assert.strictEqual(updates[2].result.status, "dispatched");
+    assert.strictEqual(updates[2].result.terminal, true);
+    assert.strictEqual(updates[2].result.text, "Message dispatched");
+    assert.strictEqual(timer.pendingCount(), 0, "Poller must stop after terminal receipt");
+  });
+
+  it("stops immediately on terminal rejected / expired / failed receipt", async () => {
+    const timer = createMockTimer();
+    const updates = [];
+
+    const poller = createReceiptPoller({
+      fetchReceipt: async () => ({ status: "rejected", reason: "SessionClosed" }),
+      onStatus: (result) => updates.push(result),
+      intervalMs: 500,
+      maxDurationMs: 2000,
+      timer,
+    });
+
+    poller.start({ requestId: "req_rej", generation: 1 });
+    await timer.advance(500);
+
+    assert.strictEqual(updates.length, 1);
+    assert.strictEqual(updates[0].terminal, true);
+    assert.strictEqual(updates[0].status, "rejected");
+    assert.strictEqual(updates[0].text, "Message rejected: SessionClosed");
+    assert.strictEqual(timer.pendingCount(), 0);
+  });
+
+  it("stops on bounded duration timeout and reports conservative timeout status", async () => {
+    const timer = createMockTimer();
+    const updates = [];
+
+    const poller = createReceiptPoller({
+      fetchReceipt: async () => ({ status: "queued" }),
+      onStatus: (result) => updates.push(result),
+      intervalMs: 500,
+      maxDurationMs: 2000,
+      timer,
+    });
+
+    poller.start({ requestId: "req_timeout", generation: 1 });
+
+    // Advance 500ms -> queued (1)
+    await timer.advance(500);
+    // Advance 1000ms -> queued (2)
+    await timer.advance(500);
+    // Advance 1500ms -> queued (3)
+    await timer.advance(500);
+    // Advance 2000ms -> elapsed >= maxDurationMs -> timeout
+    await timer.advance(500);
+
+    const last = updates[updates.length - 1];
+    assert.strictEqual(last.status, "timeout");
+    assert.strictEqual(last.terminal, true);
+    assert.strictEqual(last.text, "Message dispatch status unknown");
+    assert.strictEqual(timer.pendingCount(), 0);
+  });
+
+  it("generation and run isolation prevents older poll ticks and in-flight responses from overwriting newer sends", async () => {
+    const timer = createMockTimer();
+    const updates = [];
+    let resolveOldFetch;
+
+    const poller = createReceiptPoller({
+      fetchReceipt: async (reqId) => {
+        if (reqId === "req_old") {
+          return new Promise((resolve) => {
+            resolveOldFetch = () => resolve({ status: "dispatched" });
+          });
+        }
+        return { status: "rejected", reason: "Blocked" };
+      },
+      onStatus: (result, ctx) => {
+        updates.push({ result, ctx });
+      },
+      intervalMs: 500,
+      maxDurationMs: 2000,
+      timer,
+    });
+
+    // Start Generation 1 for req_old
+    poller.start({ requestId: "req_old", generation: 1 });
+
+    // Trigger tick 1 without awaiting it: req_old intentionally remains in flight.
+    const oldTick = timer.advance(500);
+    await Promise.resolve();
+
+    // User sends Generation 2 for req_new while req_old fetch is still in flight.
+    poller.start({ requestId: "req_new", generation: 2 });
+
+    // Old in-flight fetch resolves late and must be ignored.
+    assert.strictEqual(typeof resolveOldFetch, "function");
+    resolveOldFetch();
+    await oldTick;
+
+    // Advance timer for Generation 2 tick.
+    await timer.advance(500);
+
+    // Only Generation 2 should emit status; old in-flight response must be dropped
+    assert.strictEqual(updates.length, 1);
+    assert.strictEqual(updates[0].ctx.requestId, "req_new");
+    assert.strictEqual(updates[0].ctx.generation, 2);
+    assert.strictEqual(updates[0].result.status, "rejected");
+  });
+
+  it("recovers from transient fetch errors and keeps polling", async () => {
+    const timer = createMockTimer();
+    let callCount = 0;
+    const updates = [];
+
+    const poller = createReceiptPoller({
+      fetchReceipt: async () => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("Temporary network blip");
+        }
+        return { status: "dispatched" };
+      },
+      onStatus: (result) => updates.push(result),
+      intervalMs: 500,
+      maxDurationMs: 2000,
+      timer,
+    });
+
+    poller.start({ requestId: "req_err", generation: 1 });
+
+    // 1st tick -> error thrown, transient status emitted
+    await timer.advance(500);
+    assert.strictEqual(callCount, 1);
+    assert.strictEqual(updates[0].status, "error");
+    assert.strictEqual(updates[0].terminal, false);
+    assert.strictEqual(updates[0].text, "Message queued");
+    assert.strictEqual(timer.pendingCount(), 1, "Must continue polling after transient error");
+
+    // 2nd tick -> success dispatched
+    await timer.advance(500);
+    assert.strictEqual(callCount, 2);
+    assert.strictEqual(updates[1].status, "dispatched");
+    assert.strictEqual(updates[1].terminal, true);
+    assert.strictEqual(timer.pendingCount(), 0);
   });
 });

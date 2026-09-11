@@ -820,6 +820,251 @@ mod tests {
         server.join().unwrap();
     }
 
+    // ── Pet receipt query payload and HTTP tests ──
+
+    #[test]
+    fn test_create_pet_receipt_query_payload_valid() {
+        let payload = crate::create_pet_receipt_query_payload("pet_abc123", "req_uuid_001").unwrap();
+
+        assert_eq!(payload.schema_version, "1");
+        assert_eq!(payload.kind, "user_message_receipt_query");
+        assert_eq!(payload.pet_id, "pet_abc123");
+        assert_eq!(payload.command_id, "req_uuid_001");
+
+        let serialized = serde_json::to_string(&payload).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        let obj = value.as_object().unwrap();
+        assert_eq!(obj.len(), 4, "Receipt query payload must contain exactly 4 fields");
+        assert_eq!(value["schemaVersion"], "1");
+        assert_eq!(value["kind"], "user_message_receipt_query");
+        assert_eq!(value["petId"], "pet_abc123");
+        assert_eq!(value["commandId"], "req_uuid_001");
+    }
+
+    #[test]
+    fn test_create_pet_receipt_query_payload_invalid_pet_id() {
+        let err = crate::create_pet_receipt_query_payload("", "req_1").unwrap_err();
+        assert!(err.contains("Unbound or invalid pet identity"));
+
+        let err2 = crate::create_pet_receipt_query_payload("bad/id", "req_1").unwrap_err();
+        assert!(err2.contains("Unbound or invalid pet identity"));
+
+        let err3 = crate::create_pet_receipt_query_payload(&"a".repeat(129), "req_1").unwrap_err();
+        assert!(err3.contains("Unbound or invalid pet identity"));
+    }
+
+    #[test]
+    fn test_create_pet_receipt_query_payload_invalid_request_id() {
+        let err = crate::create_pet_receipt_query_payload("pet_1", "").unwrap_err();
+        assert!(err.contains("Invalid request ID"));
+
+        let err2 = crate::create_pet_receipt_query_payload("pet_1", "bad req id!").unwrap_err();
+        assert!(err2.contains("Invalid request ID"));
+
+        let err3 = crate::create_pet_receipt_query_payload("pet_1", &"x".repeat(65)).unwrap_err();
+        assert!(err3.contains("Invalid request ID"));
+    }
+
+    #[test]
+    fn test_post_pet_receipt_query_blocking_http_200_dispatched() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+            let req_str = String::from_utf8_lossy(&buf[..n]);
+            assert!(req_str.starts_with("POST /pet-inbox/receipt HTTP/1.1"));
+
+            let body = r#"{"status":"dispatched","petId":"pet_test","commandId":"req_100"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_receipt_query_payload("pet_test", "req_100").unwrap();
+        let receipt = crate::post_pet_receipt_query_blocking(port, &payload)
+            .expect("HTTP 200 dispatched receipt should parse successfully");
+
+        assert_eq!(receipt["status"], "dispatched");
+        assert_eq!(receipt["commandId"], "req_100");
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_receipt_query_blocking_http_202_queued() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body = r#"{"status":"queued","petId":"pet_test","commandId":"req_202"}"#;
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_receipt_query_payload("pet_test", "req_202").unwrap();
+        let receipt = crate::post_pet_receipt_query_blocking(port, &payload)
+            .expect("HTTP 202 queued receipt should parse successfully");
+
+        assert_eq!(receipt["status"], "queued");
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_receipt_query_blocking_http_422_rejected_or_expired() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body = r#"{"status":"expired","reason":"Message expired before claim"}"#;
+            let response = format!(
+                "HTTP/1.1 422 Unprocessable Entity\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_receipt_query_payload("pet_test", "req_422").unwrap();
+        let receipt = crate::post_pet_receipt_query_blocking(port, &payload)
+            .expect("HTTP 422 error receipt should parse successfully");
+
+        assert_eq!(receipt["status"], "expired");
+        assert_eq!(receipt["reason"], "Message expired before claim");
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_receipt_query_blocking_missing_server_header() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body = r#"{"status":"dispatched"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_receipt_query_payload("pet_test", "req_missing").unwrap();
+        let result = crate::post_pet_receipt_query_blocking(port, &payload);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("missing x-clawd-server header"), "got: {}", err);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_receipt_query_blocking_untrusted_server_header() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let body = r#"{"status":"dispatched"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: rogue-service\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_receipt_query_payload("pet_test", "req_untrusted").unwrap();
+        let result = crate::post_pet_receipt_query_blocking(port, &payload);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Untrusted server response"), "got: {}", err);
+        assert!(err.contains("rogue-service"), "got: {}", err);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_receipt_query_blocking_oversized_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let oversized_body = "{\"data\":\"".to_string() + &"x".repeat(70000) + "\"}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                oversized_body.len(),
+                oversized_body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_receipt_query_payload("pet_test", "req_oversized").unwrap();
+        let result = crate::post_pet_receipt_query_blocking(port, &payload);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Response body exceeded 65536 bytes limit"), "got: {}", err);
+
+        server.join().unwrap();
+    }
+
     // ── Helper ──
 
     fn make_stdin(

@@ -347,6 +347,34 @@ const eventDedup = (typeof PetEvents !== 'undefined' && PetEvents.createEventDed
 let lastStatusEventAt = Date.now();
 const WATCHDOG_INTERVAL_MS = 30000;
 let watchdogTimer = null;
+let currentSendGeneration = 0;
+const receiptPoller = (typeof PetEvents !== 'undefined' && PetEvents.createReceiptPoller)
+  ? PetEvents.createReceiptPoller({
+      fetchReceipt: async (requestId) => {
+        if (!window.__TAURI__) {
+          throw new Error('Tauri environment unavailable');
+        }
+        return await window.__TAURI__.core.invoke('get_session_message_receipt', {
+          requestId,
+        });
+      },
+      onStatus: (result) => {
+        if (result && result.terminal) {
+          if (
+            result.status === 'dispatched' ||
+            result.status === 'failed' ||
+            result.status === 'expired' ||
+            result.status === 'rejected' ||
+            result.status === 'timeout'
+          ) {
+            showTransientBubble(result.text);
+          }
+        }
+      },
+      intervalMs: 500,
+      maxDurationMs: 125000,
+    })
+  : null;
 
 const POKE_COOLDOWN_MS = 4000;
 const POKE_HOVER_MS = 3000;
@@ -1654,6 +1682,11 @@ function buildMessagePage() {
     errorEl.style.display = 'none';
     errorEl.textContent = '';
 
+    const sendGeneration = ++currentSendGeneration;
+    if (receiptPoller) {
+      receiptPoller.stop();
+    }
+
     const requestId = requestIdTracker
       ? requestIdTracker.getRequestId(rawText)
       : ((typeof PetEvents !== 'undefined' && PetEvents.generateRequestId)
@@ -1676,9 +1709,12 @@ function buildMessagePage() {
         }
         closeMenu();
         if (res.status === 'dispatched') {
-          showTransientBubble('Message already dispatched');
+          showTransientBubble('Message dispatched');
         } else {
           showTransientBubble('Message queued');
+          if (receiptPoller) {
+            receiptPoller.start({ requestId, generation: sendGeneration });
+          }
         }
       } else {
         const errMsg = (res && (res.reason || res.error || res.status)) || 'Failed to send message';

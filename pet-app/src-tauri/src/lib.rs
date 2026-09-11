@@ -971,6 +971,34 @@ fn create_pet_inbox_payload(
     })
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PetReceiptQueryPayload {
+    schema_version: String,
+    kind: String,
+    pet_id: String,
+    command_id: String,
+}
+
+fn create_pet_receipt_query_payload(
+    pet_id: &str,
+    request_id: &str,
+) -> Result<PetReceiptQueryPayload, String> {
+    if !is_safe_pet_id(pet_id) {
+        return Err("Unbound or invalid pet identity".to_string());
+    }
+    if !is_safe_request_id(request_id) {
+        return Err("Invalid request ID".to_string());
+    }
+
+    Ok(PetReceiptQueryPayload {
+        schema_version: "1".to_string(),
+        kind: "user_message_receipt_query".to_string(),
+        pet_id: pet_id.to_string(),
+        command_id: request_id.to_string(),
+    })
+}
+
 fn parse_runtime_port_from_str(content: &str) -> Result<u16, String> {
     let v: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| format!("Invalid runtime.json: {}", e))?;
@@ -1019,14 +1047,13 @@ fn verify_clawd_server_header(header: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn post_pet_inbox_blocking(
+fn post_clawd_endpoint_blocking(
     port: u16,
-    payload: &PetInboxPayload,
+    endpoint: &str,
+    json_bytes: &[u8],
 ) -> Result<serde_json::Value, String> {
     use std::io::Read;
-    let url = format!("http://127.0.0.1:{}/pet-inbox", port);
-    let json_bytes = serde_json::to_vec(payload)
-        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    let url = format!("http://127.0.0.1:{}{}", port, endpoint);
 
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(5)))
@@ -1037,7 +1064,7 @@ fn post_pet_inbox_blocking(
     let resp = agent
         .post(&url)
         .header("Content-Type", "application/json")
-        .send(&json_bytes[..])
+        .send(json_bytes)
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
     let server_header = resp
@@ -1059,6 +1086,47 @@ fn post_pet_inbox_blocking(
 
     serde_json::from_slice::<serde_json::Value>(&body_bytes)
         .map_err(|e| format!("Failed to parse response JSON: {}", e))
+}
+
+fn post_pet_inbox_blocking(
+    port: u16,
+    payload: &PetInboxPayload,
+) -> Result<serde_json::Value, String> {
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    post_clawd_endpoint_blocking(port, "/pet-inbox", &json_bytes)
+}
+
+fn post_pet_receipt_query_blocking(
+    port: u16,
+    payload: &PetReceiptQueryPayload,
+) -> Result<serde_json::Value, String> {
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    post_clawd_endpoint_blocking(port, "/pet-inbox/receipt", &json_bytes)
+}
+
+#[tauri::command]
+async fn get_session_message_receipt(
+    session_id_state: tauri::State<'_, Arc<Mutex<String>>>,
+    request_id: String,
+) -> Result<serde_json::Value, String> {
+    let pet_id = {
+        let guard = session_id_state.lock().unwrap();
+        guard.clone()
+    };
+
+    if pet_id.is_empty() {
+        return Err("Pet session is not bound".to_string());
+    }
+
+    let payload = create_pet_receipt_query_payload(&pet_id, &request_id)?;
+    let runtime_path = default_runtime_config_path();
+    let port = read_runtime_port(&runtime_path)?;
+
+    tauri::async_runtime::spawn_blocking(move || post_pet_receipt_query_blocking(port, &payload))
+        .await
+        .map_err(|e| format!("Async task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -1378,7 +1446,7 @@ pub fn run() {
         .manage(session_id_shared)
         .manage(lock_path_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message])
+        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
