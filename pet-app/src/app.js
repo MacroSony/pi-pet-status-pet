@@ -318,6 +318,9 @@ let initialized = false;
 let identityPinned = localStorage.getItem('petIdentityPinned') === 'true';
 let currentImgSrc = '';
 let bubbleTimeout = null;
+// Tracks an expression text bubble independently from the optional reaction
+// animation. Normal status churn must not erase it before its display window.
+let activeExpressionBubble = null;
 let asciiFrame = 0;
 let asciiInterval = null;
 let menuPage = 'main';
@@ -873,6 +876,7 @@ function scheduleAutoReturn(state) {
 }
 
 function onAutoReturnDecay() {
+  if (activeOneShot && activeOneShot.type === 'reaction') return;
   if (ALERT_STATES.has(currentBusinessState) || visualState === 'idle' || currentBusinessState === 'offline') {
     return;
   }
@@ -900,7 +904,6 @@ function rememberReaction(id) {
 async function playExpression(event) {
   if (ALERT_STATES.has(currentBusinessState) || dragSession) return;
   const requestVersion = ++reactionRequestVersion;
-  const statusVersion = statusUpdateVersion;
 
   const payload = (event && event.payload) || {};
   const text = typeof payload.text === 'string' && payload.text.trim().length > 0 ? payload.text : null;
@@ -911,6 +914,8 @@ async function playExpression(event) {
   if (text) {
     clearTimeout(bubbleTimeout);
     bubbleTimeout = null;
+    const expressionBubble = { requestVersion };
+    activeExpressionBubble = expressionBubble;
 
     statusText.textContent = text;
     container.dataset.bubbleVisible = 'true';
@@ -925,9 +930,10 @@ async function playExpression(event) {
     }, 50);
 
     bubbleTimeout = setTimeout(() => {
+      if (activeExpressionBubble !== expressionBubble) return;
       bubbleTimeout = null;
-      if (statusUpdateVersion !== statusVersion) return;
-      // Restore business bubble display according to current status & policy
+      activeExpressionBubble = null;
+      // Restore business bubble display according to the latest status & policy.
       const state = currentBusinessState;
       const detail = latestStatus ? latestStatus.detail : '';
       if (shouldShowBubble(state) && (detail || state === 'offline')) {
@@ -936,7 +942,7 @@ async function playExpression(event) {
         container.dataset.bubbleVisible = 'true';
       } else {
         bubble.classList.add('hidden');
-        container.dataset.bubbleVisible = shouldShowBubble(state) ? 'true' : 'false';
+        container.dataset.bubbleVisible = 'false';
       }
     }, durationMs);
   }
@@ -950,7 +956,7 @@ async function playExpression(event) {
     for (const extension of extensions) {
       const candidate = `${mode}/reaction_${emotion}.${extension}`;
       const url = await verifyImageAsset(candidate);
-      if (requestVersion !== reactionRequestVersion || statusVersion !== statusUpdateVersion) return;
+      if (requestVersion !== reactionRequestVersion) return;
       if (url) {
         reactionPath = candidate;
         break;
@@ -1324,22 +1330,30 @@ function updateStatus(status, isRealEvent = false) {
     lastStatusEventAt = Date.now();
   }
   statusUpdateVersion++;
-  // Any business-status event wins over a temporary reaction or drag,
-  // including an update that repeats the same state.
+  const state = status.state || 'idle';
+  const detail = status.detail || '';
+  const sessionName = status.session_name || '';
   const reactionWasActive = activeOneShot && activeOneShot.type === 'reaction';
   const dragWasActive = !!dragSession || (activeOneShot && activeOneShot.type === 'drag');
+  const interruptReaction = (typeof PetEvents !== 'undefined' && PetEvents.isReactionInterruptState)
+    ? PetEvents.isReactionInterruptState(state)
+    : (ALERT_STATES.has(state) || state === 'offline' || state === 'closed');
+
+  // Drag is direct user interaction and still yields to any business update.
   if (dragWasActive) {
     reactionRequestVersion++;
     cancelPokeDrag();
   }
-  if (reactionWasActive) {
+  // Reactions outrank ordinary thinking/running/idle churn. Only alert and
+  // lifecycle states interrupt their bounded presentation window.
+  if (interruptReaction && (reactionWasActive || activeExpressionBubble)) {
     reactionRequestVersion++;
-    cancelActiveOneShot();
+    if (reactionWasActive) cancelActiveOneShot();
+    activeExpressionBubble = null;
+    clearTimeout(bubbleTimeout);
+    bubbleTimeout = null;
   }
   latestStatus = status;
-  const state = status.state || 'idle';
-  const detail = status.detail || '';
-  const sessionName = status.session_name || '';
 
   if (state === 'closed' && window.__TAURI__) {
     window.__TAURI__.window.getCurrentWindow().close();
@@ -1370,12 +1384,21 @@ function updateStatus(status, isRealEvent = false) {
   }
   updateStateGemTipText(state, detail);
 
-  // Bubble policy can be off, alerts-only, or legacy all-states.
-  container.dataset.bubbleVisible = (shouldShowBubble(state) && (!!detail || state === 'offline')) ? 'true' : 'false';
-  if (!shouldShowBubble(state)) {
+  // Bubble policy can be off, alerts-only, or legacy all-states. A bounded
+  // expression bubble survives ordinary status updates and is restored to the
+  // latest business detail only when its own timer completes.
+  const preserveExpressionBubble = (typeof PetEvents !== 'undefined' && PetEvents.shouldPreserveReactionPresentation)
+    ? PetEvents.shouldPreserveReactionPresentation(!!activeExpressionBubble, state)
+    : (!!activeExpressionBubble && !interruptReaction);
+  if (preserveExpressionBubble) {
+    container.dataset.bubbleVisible = 'true';
+    bubble.classList.remove('hidden');
+  } else if (!shouldShowBubble(state)) {
+    container.dataset.bubbleVisible = 'false';
     clearTimeout(bubbleTimeout);
     bubble.classList.add('hidden');
   } else if (detail && state !== 'offline') {
+    container.dataset.bubbleVisible = 'true';
     if (statusText.textContent !== detail) {
       bubble.style.transition = 'none';
       bubble.style.transform = 'scale(0.95)';
@@ -1391,10 +1414,16 @@ function updateStatus(status, isRealEvent = false) {
       bubbleTimeout = setTimeout(() => { bubble.classList.add('hidden'); }, 30000);
     }
   } else if (state === 'offline' && shouldShowBubble(state)) {
+    container.dataset.bubbleVisible = 'true';
     statusText.textContent = detail || 'Zzz...';
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     bubbleTimeout = setTimeout(() => { bubble.classList.add('hidden'); }, 30000);
+  } else {
+    container.dataset.bubbleVisible = 'false';
+    clearTimeout(bubbleTimeout);
+    bubbleTimeout = null;
+    bubble.classList.add('hidden');
   }
 
   // Reset / reschedule auto-return timer on status update
@@ -1410,8 +1439,16 @@ function updateStatus(status, isRealEvent = false) {
     return;
   }
 
-  // Restore the same business loop when a same-state update interrupts a
-  // reaction; otherwise the normal state-change handling below applies.
+  // Ordinary state changes update the true business state but do not pre-empt
+  // a bounded reaction animation. Return to whichever state is newest when it
+  // completes.
+  if (activeOneShot && activeOneShot.type === 'reaction') {
+    activeOneShot.targetState = state;
+    return;
+  }
+
+  // Restore the same business loop when an interrupt cancelled a reaction or
+  // drag; otherwise the normal state-change handling below applies.
   if ((reactionWasActive || dragWasActive) && !stateChanged && visualState === state) {
     startStateLoop(state);
     return;
@@ -1523,6 +1560,7 @@ function addChoiceRow(parent, label, value, choices, onchange) {
 
 function showTransientBubble(msg, durationMs = 4000) {
   clearTimeout(bubbleTimeout);
+  activeExpressionBubble = null;
   statusText.textContent = msg;
   container.dataset.bubbleVisible = 'true';
   bubble.classList.remove('hidden');

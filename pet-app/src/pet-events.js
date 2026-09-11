@@ -11,6 +11,16 @@
   const VALID_EMOTIONS_SET = new Set(VALID_EMOTIONS);
   const DEFAULT_DURATION_MS = 2500;
   const DEFAULT_PRIORITY = 3; // REACTION priority
+  const REACTION_INTERRUPT_STATES = Object.freeze(['error', 'waiting', 'offline', 'closed']);
+  const REACTION_INTERRUPT_STATE_SET = new Set(REACTION_INTERRUPT_STATES);
+
+  function isReactionInterruptState(state) {
+    return typeof state === 'string' && REACTION_INTERRUPT_STATE_SET.has(state);
+  }
+
+  function shouldPreserveReactionPresentation(active, nextState) {
+    return active === true && !isReactionInterruptState(nextState);
+  }
 
   function isSafeId(id) {
     return typeof id === 'string' && id.length > 0 && id.length <= 128 && !id.includes('/') && !id.includes('\\') && !id.includes('..');
@@ -425,6 +435,9 @@
     VALID_EMOTIONS,
     DEFAULT_DURATION_MS,
     DEFAULT_PRIORITY,
+    REACTION_INTERRUPT_STATES,
+    isReactionInterruptState,
+    shouldPreserveReactionPresentation,
     isSafeId,
     isSafeRequestId,
     generateRequestId,

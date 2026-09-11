@@ -6,6 +6,9 @@ const {
   VALID_EMOTIONS,
   DEFAULT_DURATION_MS,
   DEFAULT_PRIORITY,
+  REACTION_INTERRUPT_STATES,
+  isReactionInterruptState,
+  shouldPreserveReactionPresentation,
   isSafeRequestId,
   generateRequestId,
   validateUserMessageText,
@@ -16,6 +19,28 @@ const {
   parseLegacyReaction,
   createEventDedupTracker,
 } = require("../src/pet-events.js");
+
+describe("reaction presentation priority", () => {
+  it("preserves bounded reactions across ordinary status churn", () => {
+    for (const state of ["idle", "thinking", "running", "editing", "searching", "delegating", "reading", "unknown"]) {
+      assert.strictEqual(isReactionInterruptState(state), false);
+      assert.strictEqual(shouldPreserveReactionPresentation(true, state), true);
+    }
+  });
+
+  it("lets alerts and lifecycle states interrupt reactions", () => {
+    assert.deepStrictEqual(REACTION_INTERRUPT_STATES, ["error", "waiting", "offline", "closed"]);
+    for (const state of REACTION_INTERRUPT_STATES) {
+      assert.strictEqual(isReactionInterruptState(state), true);
+      assert.strictEqual(shouldPreserveReactionPresentation(true, state), false);
+    }
+    assert.strictEqual(shouldPreserveReactionPresentation(false, "thinking"), false);
+    for (const value of [null, undefined, 42, {}]) {
+      assert.strictEqual(isReactionInterruptState(value), false);
+      assert.strictEqual(shouldPreserveReactionPresentation(true, value), true);
+    }
+  });
+});
 
 describe("parsePetEvent - schema and payload validation", () => {
   it("accepts valid expression with both text and emotion", () => {
