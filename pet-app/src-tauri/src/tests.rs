@@ -672,6 +672,52 @@ mod tests {
         assert!(err.contains("Invalid request ID"));
     }
 
+    // TCP reads are stream-oriented: one read is not guaranteed to consume the
+    // complete HTTP request. In particular, closing a Winsock connection with
+    // unread request bytes causes an RST that can discard the mock response.
+    fn read_complete_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+
+        let mut request = Vec::new();
+        let mut expected_len = None;
+        loop {
+            let mut chunk = [0u8; 2048];
+            let n = stream
+                .read(&mut chunk)
+                .expect("mock HTTP server should read the complete request");
+            assert!(n > 0, "mock HTTP request ended before its declared body");
+            request.extend_from_slice(&chunk[..n]);
+            assert!(request.len() <= 65536, "mock HTTP request exceeded test limit");
+
+            if expected_len.is_none() {
+                if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..header_end])
+                        .expect("mock HTTP request headers should be UTF-8");
+                    let content_length = headers
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .map(|(_, value)| {
+                            value
+                                .trim()
+                                .parse::<usize>()
+                                .expect("mock HTTP content-length should be numeric")
+                        })
+                        .unwrap_or(0);
+                    expected_len = Some(header_end + 4 + content_length);
+                }
+            }
+
+            if expected_len.map(|len| request.len() >= len).unwrap_or(false) {
+                return request;
+            }
+        }
+    }
+
     // ── post_pet_inbox_blocking HTTP tests ──
 
     #[test]
@@ -681,8 +727,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let body = r#"{"status":"rejected","reason":"SessionOffline"}"#;
             let response = format!(
                 "HTTP/1.1 422 Unprocessable Entity\r\n\
@@ -714,8 +759,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let body = r#"{"status":"rejected","reason":"SessionOffline"}"#;
             let response = format!(
                 "HTTP/1.1 422 Unprocessable Entity\r\n\
@@ -746,8 +790,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let body = r#"{"status":"rejected","reason":"SessionOffline"}"#;
             let response = format!(
                 "HTTP/1.1 500 Internal Server Error\r\n\
@@ -794,8 +837,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let oversized_body = "{\"data\":\"".to_string() + &"x".repeat(70000) + "\"}";
             let response = format!(
                 "HTTP/1.1 500 Internal Server Error\r\n\
@@ -872,9 +914,8 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
-            let req_str = String::from_utf8_lossy(&buf[..n]);
+            let request = read_complete_http_request(&mut stream);
+            let req_str = String::from_utf8_lossy(&request);
             assert!(req_str.starts_with("POST /pet-inbox/receipt HTTP/1.1"));
 
             let body = r#"{"status":"dispatched","petId":"pet_test","commandId":"req_100"}"#;
@@ -908,8 +949,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let body = r#"{"status":"queued","petId":"pet_test","commandId":"req_202"}"#;
             let response = format!(
                 "HTTP/1.1 202 Accepted\r\n\
@@ -940,8 +980,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let body = r#"{"status":"expired","reason":"Message expired before claim"}"#;
             let response = format!(
                 "HTTP/1.1 422 Unprocessable Entity\r\n\
@@ -973,8 +1012,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let body = r#"{"status":"dispatched"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\n\
@@ -1005,8 +1043,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let body = r#"{"status":"dispatched"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\n\
@@ -1039,8 +1076,7 @@ mod tests {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _request = read_complete_http_request(&mut stream);
             let oversized_body = "{\"data\":\"".to_string() + &"x".repeat(70000) + "\"}";
             let response = format!(
                 "HTTP/1.1 200 OK\r\n\
