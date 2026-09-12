@@ -184,11 +184,14 @@ fn default_pi_pet_dir() -> PathBuf {
     home.join(".pi-pet")
 }
 
-pub fn resolve_event_path(status_path: &PathBuf, pet_id: &str) -> PathBuf {
-    if let Some(dir) = std::env::var_os("PI_PET_DATA_DIR").map(PathBuf::from) {
+fn resolve_event_path_with_env<F>(status_path: &PathBuf, pet_id: &str, env_var: F) -> PathBuf
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    if let Some(dir) = env_var("PI_PET_DATA_DIR").map(PathBuf::from) {
         return dir.join("events").join(format!("event-{}.json", pet_id));
     }
-    if let Some(status_dir) = std::env::var_os("CLAWD_PET_BRIDGE_STATUS_DIR").map(PathBuf::from) {
+    if let Some(status_dir) = env_var("CLAWD_PET_BRIDGE_STATUS_DIR").map(PathBuf::from) {
         if let Some(parent) = status_dir.parent() {
             return parent.join("events").join(format!("event-{}.json", pet_id));
         }
@@ -204,7 +207,15 @@ pub fn resolve_event_path(status_path: &PathBuf, pet_id: &str) -> PathBuf {
             return sibling_events;
         }
     }
-    default_pi_pet_dir().join("events").join(format!("event-{}.json", pet_id))
+    let home = env_var("USERPROFILE")
+        .or_else(|| env_var("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".pi-pet").join("events").join(format!("event-{}.json", pet_id))
+}
+
+pub fn resolve_event_path(status_path: &PathBuf, pet_id: &str) -> PathBuf {
+    resolve_event_path_with_env(status_path, pet_id, |name| std::env::var_os(name))
 }
 
 pub fn read_pet_event(path: &PathBuf, log_path: &PathBuf) -> Option<PetEvent> {

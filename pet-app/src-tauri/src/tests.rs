@@ -498,12 +498,24 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_event_path() {
+    fn test_resolve_event_path_without_environment_overrides() {
         let status_path = std::path::PathBuf::from("/home/user/.pi-pet/status/status-pet_abc.json");
-        let event_path = crate::resolve_event_path(&status_path, "pet_abc");
+        let event_path = crate::resolve_event_path_with_env(&status_path, "pet_abc", |_| None);
         assert_eq!(
             event_path,
             std::path::PathBuf::from("/home/user/.pi-pet/events/event-pet_abc.json")
+        );
+    }
+
+    #[test]
+    fn test_resolve_event_path_prefers_explicit_pi_pet_data_dir() {
+        let status_path = std::path::PathBuf::from("/other/status/status-pet_abc.json");
+        let event_path = crate::resolve_event_path_with_env(&status_path, "pet_abc", |name| {
+            (name == "PI_PET_DATA_DIR").then(|| std::ffi::OsString::from("/smoke-data"))
+        });
+        assert_eq!(
+            event_path,
+            std::path::PathBuf::from("/smoke-data/events/event-pet_abc.json")
         );
     }
 
