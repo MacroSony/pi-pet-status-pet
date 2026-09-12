@@ -11,8 +11,6 @@ const artStage = document.getElementById('art-stage');
 const imgWrapper = document.getElementById('ferris-wrapper');
 const imgEl = document.getElementById('ferris-img');
 const asciiPre = document.getElementById('ascii-art');
-const huddleBadge = document.getElementById('huddle-badge');
-const huddleCountEl = document.getElementById('huddle-count');
 const charMenu = document.getElementById('char-menu');
 const menuBackdrop = document.getElementById('menu-backdrop');
 
@@ -333,11 +331,6 @@ let boundSessionId = '';
 let sessionPoll = null;
 const dlcInstalledCache = {};
 
-let huddleState = { active: false, participantCount: 1 };
-let huddlePollTimer = null;
-let huddlePollInFlight = false;
-const HUDDLE_POLL_INTERVAL_MS = 3000;
-
 let activeOneShot = null;      // Currently active one-shot { type, priority, targetState, timerIds }
 let autoReturnTimer = null;    // Timer for auto-return decay
 let idleVariationTimer = null; // Timer for idle variation triggers
@@ -468,60 +461,8 @@ function shouldShowStateGem() {
 function updateStateGemTipText(state, detail) {
   if (!stateGemTip) return;
   const tipDetail = (state === 'offline' && !detail) ? 'Zzz...' : detail;
-  let text = tipDetail ? `${state}: ${tipDetail}` : state;
-  if (huddleState && huddleState.active && huddleState.participantCount >= 2) {
-    text += ` · ${huddleState.participantCount} pets in huddle`;
-  }
+  const text = tipDetail ? `${state}: ${tipDetail}` : state;
   stateGemTip.textContent = text;
-}
-
-function setHuddleStatus(rawStatus) {
-  huddleState = (typeof PetEvents !== 'undefined' && PetEvents.normalizeHuddleStatus)
-    ? PetEvents.normalizeHuddleStatus(rawStatus)
-    : { active: false, participantCount: 1 };
-  updateHuddleUI();
-}
-
-function updateHuddleUI() {
-  const active = !!(huddleState && huddleState.active);
-  const count = (huddleState && huddleState.participantCount) || 1;
-
-  container.dataset.huddle = active ? 'active' : 'inactive';
-
-  if (huddleBadge) {
-    huddleBadge.hidden = !active;
-    if (active) {
-      huddleBadge.setAttribute('aria-label', `${count} pets in huddle`);
-      if (huddleCountEl) huddleCountEl.textContent = String(count);
-    } else {
-      huddleBadge.removeAttribute('aria-label');
-      if (huddleCountEl) huddleCountEl.textContent = '';
-    }
-  }
-
-  const currentDetail = (latestStatus && latestStatus.detail) || (statusText ? statusText.textContent : '');
-  updateStateGemTipText(currentBusinessState, currentDetail);
-}
-
-async function checkHuddleStatus() {
-  if (!window.__TAURI__ || huddlePollInFlight) return;
-  huddlePollInFlight = true;
-  try {
-    const wasActive = !!(huddleState && huddleState.active);
-    const raw = await window.__TAURI__.core.invoke('get_huddle_status', { wasActive });
-    setHuddleStatus(raw);
-  } catch (_) {
-    // On invoke rejection preserve last state (no flicker)
-  } finally {
-    huddlePollInFlight = false;
-  }
-}
-
-function startHuddlePolling() {
-  if (!huddlePollTimer) {
-    huddlePollTimer = setInterval(checkHuddleStatus, HUDDLE_POLL_INTERVAL_MS);
-  }
-  checkHuddleStatus();
 }
 
 // ── Apply visual config ──
@@ -574,7 +515,6 @@ function applyConfig() {
   container.dataset.bubble = appearance.bubble;
   container.dataset.bubbleVisible = shouldShowBubble(currentBusinessState) ? 'true' : 'false';
   container.dataset.stateLabel = appearance.stateLabel;
-  container.dataset.huddle = (huddleState && huddleState.active) ? 'active' : 'inactive';
   setVisualAnimation(visualState);
   stateLabel.hidden = !shouldShowStateLabel(currentBusinessState);
   if (stateGem) {
@@ -1426,9 +1366,6 @@ function updateStatus(status, isRealEvent = false) {
 
   if (status.session_id && !boundSessionId) {
     boundSessionId = status.session_id;
-    if (window.__TAURI__) {
-      startHuddlePolling();
-    }
   }
 
   const previousBusinessState = currentBusinessState;
@@ -2104,7 +2041,6 @@ async function bindToSession(sessionId) {
     boundSessionId = sessionId;
     charMenu.classList.add('hidden');
     menuBackdrop.classList.add('hidden');
-    startHuddlePolling();
   } catch (e) {
     statusText.textContent = 'Bind failed: ' + e;
     bubble.classList.remove('hidden');
@@ -2119,7 +2055,6 @@ if (window.__TAURI__) {
   window.__TAURI__.core.invoke('get_session_id').then((sid) => {
     if (sid) {
       boundSessionId = sid;
-      startHuddlePolling();
     } else {
       // No explicit session — show session picker
       showSessionPicker();
@@ -2129,7 +2064,6 @@ if (window.__TAURI__) {
   window.__TAURI__.core.invoke('get_event').then((e) => { if (e) handlePetEvent(e); });
 } else {
   // Browser demo mode: demo cycle showcasing transitions and state loops
-  setHuddleStatus({ active: true, participantCount: 3 });
   const demos = [
     { state: 'idle', detail: 'Waiting for prompt...' },
     { state: 'editing', detail: 'Editing src/app.js' },

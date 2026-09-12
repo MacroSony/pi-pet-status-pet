@@ -201,29 +201,6 @@
     return typeof id === 'string' && id.length > 0 && id.length <= 64 && /^[A-Za-z0-9_-]+$/.test(id);
   }
 
-  function normalizeHuddleStatus(raw) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-      return { active: false, participantCount: 1 };
-    }
-
-    if (raw.active !== true) {
-      return { active: false, participantCount: 1 };
-    }
-
-    const countRaw = raw.participantCount;
-
-    if (typeof countRaw !== 'number' || !Number.isSafeInteger(countRaw) || countRaw < 2) {
-      return { active: false, participantCount: 1 };
-    }
-
-    const participantCount = countRaw > 99 ? 99 : countRaw;
-
-    return {
-      active: true,
-      participantCount,
-    };
-  }
-
   function getReactionAssetCandidates(config, mode, emotion) {
     if (typeof mode !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(mode)) return [];
     if (typeof emotion !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(emotion)) return [];
@@ -490,7 +467,6 @@
     parsePetEvent,
     parseLegacyReaction,
     createEventDedupTracker,
-    normalizeHuddleStatus,
     getReactionAssetCandidates,
   };
 });

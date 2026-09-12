@@ -1166,80 +1166,6 @@ async fn send_session_message(
         .map_err(|e| format!("Async task failed: {}", e))?
 }
 
-#[tauri::command]
-fn get_huddle_status(
-    session_id_state: tauri::State<'_, Arc<Mutex<String>>>,
-    status_path_state: tauri::State<'_, Arc<Mutex<PathBuf>>>,
-    window: tauri::WebviewWindow,
-    was_active: Option<bool>,
-) -> window_layout::HuddleStatus {
-    let sid = {
-        let guard = session_id_state.lock().unwrap();
-        guard.clone()
-    };
-    if sid.is_empty() || !is_safe_session_id(&sid) {
-        return window_layout::HuddleStatus::inactive();
-    }
-
-    let pos = match window.outer_position() {
-        Ok(p) => p,
-        Err(_) => return window_layout::HuddleStatus::inactive(),
-    };
-    let size = match window.outer_size() {
-        Ok(s) => s,
-        Err(_) => return window_layout::HuddleStatus::inactive(),
-    };
-    if size.width == 0 || size.height == 0 {
-        return window_layout::HuddleStatus::inactive();
-    }
-
-    let current_monitor = match window.current_monitor() {
-        Ok(Some(m)) => m,
-        _ => return window_layout::HuddleStatus::inactive(),
-    };
-
-    let mon_pos = current_monitor.position();
-    let mon_size = current_monitor.size();
-    if mon_size.width == 0 || mon_size.height == 0 {
-        return window_layout::HuddleStatus::inactive();
-    }
-
-    let monitor = window_layout::MonitorBounds {
-        x: mon_pos.x,
-        y: mon_pos.y,
-        width: mon_size.width,
-        height: mon_size.height,
-        scale_factor: current_monitor.scale_factor(),
-        is_primary: false,
-        is_current: true,
-    };
-
-    let mut lock_dirs = vec![default_pet_dir(), default_pi_pet_dir().join("status")];
-    if let Some(parent) = status_path_state.lock().unwrap().parent() {
-        let parent_buf = parent.to_path_buf();
-        if !lock_dirs.contains(&parent_buf) {
-            lock_dirs.push(parent_buf);
-        }
-    }
-    let positions_dir = default_pet_dir().join("positions");
-
-    let peer_positions =
-        window_layout::collect_active_peer_positions(&sid, &lock_dirs, &positions_dir);
-    let current_pos = SavedWindowPosition {
-        x: pos.x,
-        y: pos.y,
-    };
-
-    window_layout::evaluate_huddle_status(
-        current_pos,
-        size.width,
-        size.height,
-        &monitor,
-        &peer_positions,
-        was_active.unwrap_or(false),
-    )
-}
-
 fn write_lock_file(lock_path: &PathBuf) {
     let _ = fs::write(lock_path, std::process::id().to_string());
 }
@@ -1550,7 +1476,7 @@ pub fn run() {
         .manage(session_id_shared)
         .manage(lock_path_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt, get_huddle_status])
+        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
