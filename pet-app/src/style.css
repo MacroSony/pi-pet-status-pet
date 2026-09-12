@@ -83,6 +83,8 @@ html, body {
 
 /* Ferris image */
 #ferris-wrapper {
+  position: relative;
+  z-index: 1;
   width: 140px;
   height: 140px;
   display: flex;
@@ -374,6 +376,8 @@ html, body {
 
 /* ASCII art character */
 #ascii-art {
+  position: relative;
+  z-index: 1;
   font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
   font-size: 16px;
   line-height: 1.2;
@@ -655,6 +659,67 @@ html, body {
 .anim-offline #state-label { color: #95a5a6; }
 .anim-offline #state-gem { --gem-color: #95a5a6; }
 
+/* Huddle is an ambient proximity cue, independent from the business state. */
+#huddle-ring {
+  position: absolute;
+  z-index: 0;
+  inset: -4px;
+  border: 2px solid rgba(245, 158, 11, 0.5);
+  border-radius: 50%;
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.28), inset 0 0 10px rgba(245, 158, 11, 0.16);
+  opacity: 0;
+  transform: scale(0.9);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  pointer-events: none;
+}
+
+@keyframes huddle-glow {
+  50% {
+    border-color: rgba(251, 191, 36, 0.75);
+    box-shadow: 0 0 22px rgba(245, 158, 11, 0.48), inset 0 0 14px rgba(245, 158, 11, 0.22);
+  }
+}
+
+#pet-container[data-huddle="active"] #huddle-ring {
+  opacity: 1;
+  transform: scale(1);
+  animation: huddle-glow 3.2s ease-in-out infinite;
+}
+
+#huddle-badge {
+  position: absolute;
+  z-index: 3;
+  top: -3px;
+  right: -7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid rgba(245, 158, 11, 0.68);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
+  color: #78350f;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+}
+
+#huddle-badge[hidden] { display: none; }
+.huddle-dots { display: inline-flex; gap: 2px; }
+.huddle-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #f59e0b;
+}
+.preset-minimal #huddle-badge {
+  color: #fef08a;
+  background: rgba(15, 23, 42, 0.92);
+  border-color: rgba(251, 191, 36, 0.58);
+}
+
 /* Presentation presets. Classic is deliberately the legacy appearance. */
 .preset-minimal #speech-bubble {
   background: rgba(15, 23, 42, 0.88);
@@ -693,6 +758,6 @@ html, body {
 .motion-intrinsic #ascii-art { animation: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  #ferris-wrapper, #ascii-art, #speech-bubble, #session-name, #state-gem, #state-gem::before { animation: none !important; transition-duration: 0.01ms !important; }
+  #ferris-wrapper, #ascii-art, #speech-bubble, #session-name, #state-gem, #state-gem::before, #huddle-ring, #huddle-badge { animation: none !important; transition-duration: 0.01ms !important; }
 }
 
