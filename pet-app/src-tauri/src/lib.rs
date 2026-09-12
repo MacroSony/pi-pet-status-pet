@@ -9,6 +9,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, Position};
 
 pub mod adapter;
 pub mod status_map;
+mod window_layout;
 #[cfg(test)]
 mod tests;
 
@@ -107,7 +108,7 @@ pub struct PetEvent {
 fn default_schema_version() -> String { "1".to_string() }
 fn default_expression_kind() -> String { "expression".to_string() }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct SavedWindowPosition {
     x: i32,
     y: i32,
@@ -1441,6 +1442,23 @@ pub fn run() {
     let restore_position_path = position_path.clone();
     let save_position_path = position_path.clone();
 
+    let mut lock_dirs = vec![default_pet_dir()];
+    if let Some(parent) = initial_status_path.parent() {
+        let parent_buf = parent.to_path_buf();
+        if !lock_dirs.contains(&parent_buf) {
+            lock_dirs.push(parent_buf);
+        }
+    }
+    if let Some(lock) = initial_lock.as_ref() {
+        if let Some(parent) = lock.parent() {
+            let parent_buf = parent.to_path_buf();
+            if !lock_dirs.contains(&parent_buf) {
+                lock_dirs.push(parent_buf);
+            }
+        }
+    }
+    let positions_dir = default_pet_dir().join("positions");
+
     tauri::Builder::default()
         .manage(status_path_shared)
         .manage(session_id_shared)
@@ -1453,6 +1471,22 @@ pub fn run() {
             if let Some(path) = restore_position_path.as_ref() {
                 if let Some(saved) = read_window_position(path) {
                     let _ = window.set_position(Position::Physical(PhysicalPosition::new(saved.x, saved.y)));
+                } else if !initial_session_id.is_empty() {
+                    let available = window.available_monitors().unwrap_or_default();
+                    let primary = window.primary_monitor().ok().flatten();
+                    let current = window.current_monitor().ok().flatten();
+                    let monitors = window_layout::build_monitors(&available, primary.as_ref(), current.as_ref());
+                    let peer_positions = window_layout::collect_active_peer_positions(&initial_session_id, &lock_dirs, &positions_dir);
+                    if let (Some(monitor), Ok(win_size)) = (
+                        window_layout::choose_target_monitor(&monitors, &peer_positions),
+                        window.outer_size(),
+                    ) {
+                        if win_size.width > 0 && win_size.height > 0 {
+                            let chosen = window_layout::calculate_auto_stagger_position(monitor, win_size.width, win_size.height, &peer_positions);
+                            write_window_position(path, PhysicalPosition::new(chosen.x, chosen.y));
+                            let _ = window.set_position(Position::Physical(PhysicalPosition::new(chosen.x, chosen.y)));
+                        }
+                    }
                 }
             }
 
