@@ -962,6 +962,20 @@ function rememberReaction(id) {
   return eventDedup.remember(id);
 }
 
+async function findReactionAsset(emotion, isCurrent) {
+  const cfg = activeCharacterConfig || CHARACTER_CONFIGS[mode];
+  const candidates = (typeof PetEvents !== 'undefined' && PetEvents.getReactionAssetCandidates)
+    ? PetEvents.getReactionAssetCandidates(cfg, mode, emotion)
+    : ['webp', 'gif', 'svg', 'png'].map(extension => `${mode}/reaction_${emotion}.${extension}`);
+
+  for (const candidate of candidates) {
+    const url = await verifyImageAsset(candidate);
+    if (typeof isCurrent === 'function' && !isCurrent()) return null;
+    if (url) return candidate;
+  }
+  return null;
+}
+
 async function playExpression(event) {
   if (ALERT_STATES.has(currentBusinessState) || dragSession) return;
   const requestVersion = ++reactionRequestVersion;
@@ -1010,19 +1024,10 @@ async function playExpression(event) {
 
   // 2. Emotion reaction animation
   if (emotion) {
-    const extensions = ['webp', 'gif', 'svg'];
-    let reactionPath = null;
-
-    // Try convention-based reaction sprite files in order; missing assets are optional.
-    for (const extension of extensions) {
-      const candidate = `${mode}/reaction_${emotion}.${extension}`;
-      const url = await verifyImageAsset(candidate);
-      if (requestVersion !== reactionRequestVersion) return;
-      if (url) {
-        reactionPath = candidate;
-        break;
-      }
-    }
+    const reactionPath = await findReactionAsset(
+      emotion,
+      () => requestVersion === reactionRequestVersion,
+    );
 
     if (!reactionPath || ALERT_STATES.has(currentBusinessState) || dragSession) {
       // Missing animation asset: reaction skipped silently, text remains visible.
@@ -1143,19 +1148,12 @@ function markPokePointerMoved(event) {
 }
 
 async function beginPokeDrag(pointer, session) {
-  const extensions = ['webp', 'gif', 'svg'];
-  let reactionPath = null;
-
-  for (const extension of extensions) {
-    const candidate = `${mode}/reaction_drag.${extension}`;
-    const url = await verifyImageAsset(candidate);
-    if (dragSession !== session || statusUpdateVersion !== session.statusVersion
-      || ALERT_STATES.has(currentBusinessState)) return;
-    if (url) {
-      reactionPath = candidate;
-      break;
-    }
-  }
+  const reactionPath = await findReactionAsset(
+    'drag',
+    () => dragSession === session
+      && statusUpdateVersion === session.statusVersion
+      && !ALERT_STATES.has(currentBusinessState),
+  );
 
   // Drag reactions are optional. Keep the animation that was already playing
   // when no drag asset exists.
@@ -2235,6 +2233,12 @@ async function preloadAssets() {
     const variations = getIdleVariations(cfg);
     for (const v of variations) {
       for (const f of v.frames) paths.push(f);
+    }
+    if (cfg.reactions && typeof cfg.reactions === 'object') {
+      for (const reaction of Object.values(cfg.reactions)) {
+        const frames = Array.isArray(reaction) ? reaction : [reaction];
+        for (const frame of frames) if (typeof frame === 'string') paths.push(frame);
+      }
     }
   }
   await Promise.all([...new Set(paths.filter(Boolean))].map(p => loadAsset(p)));

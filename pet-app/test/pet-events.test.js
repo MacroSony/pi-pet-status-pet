@@ -2,6 +2,8 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const path = require("node:path");
 const {
   VALID_EMOTIONS,
   DEFAULT_DURATION_MS,
@@ -18,6 +20,7 @@ const {
   parsePetEvent,
   parseLegacyReaction,
   createEventDedupTracker,
+  getReactionAssetCandidates,
 } = require("../src/pet-events.js");
 
 describe("reaction presentation priority", () => {
@@ -39,6 +42,35 @@ describe("reaction presentation priority", () => {
       assert.strictEqual(isReactionInterruptState(value), false);
       assert.strictEqual(shouldPreserveReactionPresentation(true, value), true);
     }
+  });
+});
+
+describe("reaction asset candidates", () => {
+  it("prefers configured assets and includes every supported convention format", () => {
+    const candidates = getReactionAssetCandidates(
+      { reactions: { happy: ["pet/happy-a.svg", "pet/happy-b.gif"] } },
+      "pet",
+      "happy",
+    );
+    assert.deepStrictEqual(candidates.slice(0, 2), ["pet/happy-a.svg", "pet/happy-b.gif"]);
+    assert.ok(candidates.includes("pet/reaction_happy.webp"));
+    assert.ok(candidates.includes("pet/reaction_happy.gif"));
+    assert.ok(candidates.includes("pet/reaction_happy.svg"));
+    assert.ok(candidates.includes("pet/reaction_happy.png"));
+  });
+
+  it("maps every public Ferris emotion and drag to an existing bundled asset", () => {
+    const config = JSON.parse(fs.readFileSync(path.join(__dirname, "../src/ferris/character.json"), "utf8"));
+    for (const emotion of [...VALID_EMOTIONS, "drag"]) {
+      const [configured] = getReactionAssetCandidates(config, "ferris", emotion);
+      assert.ok(configured, `missing Ferris mapping for ${emotion}`);
+      assert.ok(fs.existsSync(path.join(__dirname, "../src", configured)), `missing asset ${configured}`);
+    }
+  });
+
+  it("rejects unsafe mode or emotion names", () => {
+    assert.deepStrictEqual(getReactionAssetCandidates({}, "../pet", "happy"), []);
+    assert.deepStrictEqual(getReactionAssetCandidates({}, "pet", "../happy"), []);
   });
 });
 

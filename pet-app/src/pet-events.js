@@ -13,6 +13,7 @@
   const DEFAULT_PRIORITY = 3; // REACTION priority
   const REACTION_INTERRUPT_STATES = Object.freeze(['error', 'waiting', 'offline', 'closed']);
   const REACTION_INTERRUPT_STATE_SET = new Set(REACTION_INTERRUPT_STATES);
+  const REACTION_ASSET_EXTENSIONS = Object.freeze(['webp', 'gif', 'svg', 'png']);
 
   function isReactionInterruptState(state) {
     return typeof state === 'string' && REACTION_INTERRUPT_STATE_SET.has(state);
@@ -221,6 +222,24 @@
       active: true,
       participantCount,
     };
+  }
+
+  function getReactionAssetCandidates(config, mode, emotion) {
+    if (typeof mode !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(mode)) return [];
+    if (typeof emotion !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(emotion)) return [];
+
+    const configured = config && config.reactions && typeof config.reactions === 'object'
+      ? config.reactions[emotion]
+      : null;
+    const configuredList = Array.isArray(configured) ? configured : [configured];
+    const candidates = configuredList
+      .filter(path => typeof path === 'string' && path.length > 0 && path.length <= 512)
+      .slice(0, 16);
+
+    for (const extension of REACTION_ASSET_EXTENSIONS) {
+      candidates.push(`${mode}/reaction_${emotion}.${extension}`);
+    }
+    return [...new Set(candidates)];
   }
 
   function generateRequestId(customCrypto) {
@@ -472,5 +491,6 @@
     parseLegacyReaction,
     createEventDedupTracker,
     normalizeHuddleStatus,
+    getReactionAssetCandidates,
   };
 });

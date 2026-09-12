@@ -5,6 +5,14 @@
   "transitions": {},
   "idle_variations": {},
   "auto_return_seconds": 90,
+  "reactions": {
+    "happy": ["ferris/24.svg", "ferris/34.svg"],
+    "shy": ["ferris/9.svg"],
+    "shocked": ["ferris/23.svg"],
+    "sad": ["ferris/22.svg", "ferris/42.svg"],
+    "celebrate": ["ferris/12.svg", "ferris/20.svg"],
+    "drag": ["ferris/10.svg"]
+  },
   "states": {
     "idle":       ["ferris/1.svg"],
     "thinking":   ["ferris/3.svg", "ferris/14.svg"],
