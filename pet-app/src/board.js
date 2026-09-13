@@ -98,10 +98,19 @@ async function initializeTeamBoard(win = window, doc = document) {
   return true;
 }
 
+function initOnDomReady(win = window, doc = document) {
+  if (!doc) return;
+  if (doc.readyState === 'loading') {
+    win.addEventListener('DOMContentLoaded', () => { initializeTeamBoard(win, doc); }, { once: true });
+  } else {
+    initializeTeamBoard(win, doc);
+  }
+}
+
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-  window.addEventListener('DOMContentLoaded', () => { initializeTeamBoard(); });
+  initOnDomReady(window, document);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { initializeTeamBoard, renderTeamBoard, MEMBER_STATES, TEAM_ROLES };
+  module.exports = { initializeTeamBoard, initOnDomReady, renderTeamBoard, MEMBER_STATES, TEAM_ROLES };
 }

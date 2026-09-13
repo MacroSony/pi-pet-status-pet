@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { renderTeamBoard } = require('../src/board.js');
+const { renderTeamBoard, initOnDomReady, initializeTeamBoard } = require('../src/board.js');
 
 class FakeElement {
   constructor(id = '') {
@@ -88,5 +88,109 @@ test('pet badge is wired as a non-poke, presentation-only Board entry point', ()
   assert.doesNotMatch(board, /\.innerHTML\s*=/);
   for (const forbidden of ['teamId', 'petId', 'rawSessionId', 'capabilityToken', 'psh_']) {
     assert.doesNotMatch(board, new RegExp(forbidden));
+  }
+});
+
+test('initializes board immediately when DOM readyState is interactive or complete', async () => {
+  const doc = makeDocument();
+  doc.readyState = 'complete';
+  let invoked = null;
+  let listened = null;
+  const win = {
+    addEventListener: () => { throw new Error('should not add listener when already complete'); },
+    __TAURI__: {
+      core: {
+        invoke: async (cmd) => {
+          invoked = cmd;
+          return {
+            name: 'Release Crew',
+            role: 'member',
+            members: [{ displayName: 'Dev', role: 'member', state: 'idle', host: 'local' }],
+            board: { status: 'ready', revision: 1, markdown: 'Ready', updatedBy: 'Dev' },
+          };
+        },
+      },
+      event: {
+        listen: async (eventName) => {
+          listened = eventName;
+        },
+      },
+    },
+  };
+
+  initOnDomReady(win, doc);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(invoked, 'get_team_presentation');
+  assert.equal(listened, 'team-presentation-update');
+  assert.equal(doc.elements['team-name'].textContent, 'Release Crew');
+});
+
+test('waits for DOMContentLoaded when DOM readyState is loading', async () => {
+  const doc = makeDocument();
+  doc.readyState = 'loading';
+  let listenerAttached = false;
+  let listenerCb = null;
+  let invoked = null;
+  const win = {
+    addEventListener: (event, cb) => {
+      if (event === 'DOMContentLoaded') {
+        listenerAttached = true;
+        listenerCb = cb;
+      }
+    },
+    __TAURI__: {
+      core: {
+        invoke: async (cmd) => {
+          invoked = cmd;
+          return {
+            name: 'Release Crew',
+            role: 'member',
+            members: [{ displayName: 'Dev', role: 'member', state: 'idle', host: 'local' }],
+            board: { status: 'ready', revision: 1, markdown: 'Ready', updatedBy: 'Dev' },
+          };
+        },
+      },
+      event: {
+        listen: async () => {},
+      },
+    },
+  };
+
+  initOnDomReady(win, doc);
+  assert.equal(listenerAttached, true);
+  assert.equal(invoked, null);
+
+  listenerCb();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(invoked, 'get_team_presentation');
+  assert.equal(doc.elements['team-name'].textContent, 'Release Crew');
+});
+
+test('Rust command, window-label isolation, and devUrl contracts', () => {
+  const libRs = fs.readFileSync(path.join(__dirname, '../src-tauri/src/lib.rs'), 'utf8');
+
+  // open_team_board is async
+  assert.match(libRs, /async\s+fn\s+open_team_board/);
+
+  // on_window_event checks window.label() == "main"
+  assert.match(libRs, /handle_window_moved_logic\(window\.label\(\)/);
+  assert.match(libRs, /handle_window_destroyed_logic\(\s*window\.label\(\)/);
+
+  // window isolation checks
+  assert.match(libRs, /window_label\s*==\s*"main"/);
+  assert.match(libRs, /"team-board"/);
+
+  // devUrl is preserved in tauri.conf.json
+  const tauriConf = fs.readFileSync(path.join(__dirname, '../src-tauri/tauri.conf.json'), 'utf8');
+  assert.match(tauriConf, /"devUrl":\s*"http:\/\/localhost:1420"/);
+
+  // No sensitive IDs or tokens exposed in Team presentation structs
+  const memberStruct = libRs.match(/struct TeamPresentationMember\s*\{([^}]+)\}/)?.[1] || '';
+  const teamStruct = libRs.match(/struct TeamPresentation\s*\{([^}]+)\}/)?.[1] || '';
+  const boardStruct = libRs.match(/struct TeamBoardPresentation\s*\{([^}]+)\}/)?.[1] || '';
+  for (const forbidden of ['teamId', 'petId', 'rawSessionId', 'capabilityToken', 'psh_']) {
+    assert.doesNotMatch(memberStruct, new RegExp(forbidden));
+    assert.doesNotMatch(teamStruct, new RegExp(forbidden));
+    assert.doesNotMatch(boardStruct, new RegExp(forbidden));
   }
 });

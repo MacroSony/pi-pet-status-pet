@@ -2,7 +2,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindowBuilder};
@@ -355,18 +355,145 @@ fn get_team_presentation(status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>) -> 
     read_status(&path).and_then(|status| status.team)
 }
 
+#[derive(Clone, Default)]
+struct BoardLockState(Arc<Mutex<Option<PathBuf>>>);
+
+fn hash_team_board_key_part(hash: &mut u64, value: &str) {
+    for byte in value.len().to_le_bytes().iter().chain(value.as_bytes()) {
+        *hash ^= *byte as u64;
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+}
+
+fn derive_team_board_lock_key(team: &TeamPresentation) -> String {
+    let mut members: Vec<(&str, &str)> = team
+        .members
+        .iter()
+        .map(|member| (member.display_name.trim(), member.host.trim()))
+        .collect();
+    members.sort_unstable();
+    members.dedup();
+
+    let mut hash = 0xcbf29ce484222325_u64;
+    hash_team_board_key_part(&mut hash, team.name.trim());
+    for (name, host) in members {
+        hash_team_board_key_part(&mut hash, name);
+        hash_team_board_key_part(&mut hash, host);
+    }
+    format!("{:016x}", hash)
+}
+
+fn derive_team_board_lock_path(status_path: &Path, team: &TeamPresentation) -> PathBuf {
+    let status_dir = status_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(default_pet_dir);
+    status_dir.join(format!("team-board-{}.lock", derive_team_board_lock_key(team)))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoardLockClaim {
+    Acquired,
+    HeldByLiveProcess,
+}
+
+fn claim_board_lock(lock_path: &Path) -> std::io::Result<BoardLockClaim> {
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    for _ in 0..2 {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(lock_path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(std::process::id().to_string().as_bytes()) {
+                    let _ = fs::remove_file(lock_path);
+                    return Err(error);
+                }
+                return Ok(BoardLockClaim::Acquired);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if is_lock_alive(&lock_path.to_path_buf()) {
+                    return Ok(BoardLockClaim::HeldByLiveProcess);
+                }
+                match fs::remove_file(lock_path) {
+                    Ok(()) => {}
+                    Err(remove_error) if remove_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(remove_error) => return Err(remove_error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        "could not claim Team Board lock",
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WindowDestroyOutcome {
+    PetLockCleaned(PathBuf),
+    BoardLockCleaned(PathBuf),
+    NoOp,
+}
+
+fn handle_window_moved_logic(
+    window_label: &str,
+    session_id: &str,
+    positions_dir: &Path,
+    position: PhysicalPosition<i32>,
+) -> Option<PathBuf> {
+    if window_label == "main" && !session_id.is_empty() && is_safe_session_id(session_id) {
+        let path = positions_dir.join(format!("{}.json", session_id));
+        write_window_position(&path, position);
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn handle_window_destroyed_logic(
+    window_label: &str,
+    pet_lock: &Mutex<Option<PathBuf>>,
+    board_lock: &Mutex<Option<PathBuf>>,
+) -> WindowDestroyOutcome {
+    let state = match window_label {
+        "main" => pet_lock,
+        "team-board" => board_lock,
+        _ => return WindowDestroyOutcome::NoOp,
+    };
+    let lock = state.lock().unwrap().take();
+    let Some(lock) = lock else {
+        return WindowDestroyOutcome::NoOp;
+    };
+    let _ = fs::remove_file(&lock);
+    if window_label == "main" {
+        WindowDestroyOutcome::PetLockCleaned(lock)
+    } else {
+        WindowDestroyOutcome::BoardLockCleaned(lock)
+    }
+}
+
 #[tauri::command]
-fn open_team_board(
+async fn open_team_board(
     app: tauri::AppHandle,
     status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>,
+    board_lock_state: tauri::State<'_, BoardLockState>,
 ) -> Result<bool, String> {
-    let has_team = {
-        let path = status_path.lock().map_err(|_| "status path unavailable".to_string())?;
-        read_status(&path).and_then(|status| status.team).is_some()
+    let (status_path_buf, team) = {
+        let path = status_path
+            .lock()
+            .map_err(|_| "status path unavailable".to_string())?
+            .clone();
+        let team = read_status(&path).and_then(|status| status.team);
+        (path, team)
     };
-    if !has_team {
+    let Some(team) = team else {
         return Ok(false);
-    }
+    };
 
     if let Some(window) = app.get_webview_window("team-board") {
         window.show().map_err(|error| error.to_string())?;
@@ -374,7 +501,18 @@ fn open_team_board(
         return Ok(true);
     }
 
-    WebviewWindowBuilder::new(&app, "team-board", WebviewUrl::App("board.html".into()))
+    let board_lock_path = derive_team_board_lock_path(&status_path_buf, &team);
+    match claim_board_lock(&board_lock_path).map_err(|error| error.to_string())? {
+        BoardLockClaim::HeldByLiveProcess => return Ok(true),
+        BoardLockClaim::Acquired => {}
+    }
+    *board_lock_state.0.lock().unwrap() = Some(board_lock_path.clone());
+
+    let build_result = WebviewWindowBuilder::new(
+        &app,
+        "team-board",
+        WebviewUrl::App("board.html".into()),
+    )
         .title("Pi Pet Team Board")
         .inner_size(520.0, 620.0)
         .min_inner_size(380.0, 420.0)
@@ -384,9 +522,17 @@ fn open_team_board(
         .always_on_top(false)
         .skip_taskbar(false)
         .focused(true)
-        .build()
-        .map_err(|error| error.to_string())?;
-    Ok(true)
+        .build();
+
+    match build_result {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            if let Some(lock) = board_lock_state.0.lock().unwrap().take() {
+                let _ = fs::remove_file(lock);
+            }
+            Err(error.to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -1579,8 +1725,10 @@ pub fn run() {
     let status_path_shared = Arc::new(Mutex::new(initial_status_path.clone()));
     let session_id_shared = Arc::new(Mutex::new(initial_session_id.clone()));
     let lock_path_shared: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(initial_lock.clone()));
+    let board_lock_state_shared = BoardLockState(Arc::new(Mutex::new(None)));
 
     let lock_for_cleanup = lock_path_shared.clone();
+    let board_lock_for_cleanup = board_lock_state_shared.clone();
     let position_path = if initial_session_id.is_empty() {
         None
     } else {
@@ -1610,6 +1758,7 @@ pub fn run() {
         .manage(status_path_shared)
         .manage(session_id_shared)
         .manage(lock_path_shared)
+        .manage(board_lock_state_shared)
         .manage(assets_dir)
         .invoke_handler(tauri::generate_handler![get_status, get_team_presentation, open_team_board, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
         .setup(move |app| {
@@ -1805,21 +1954,19 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(move |_window, event| {
+        .on_window_event(move |window, event| {
             match event {
                 tauri::WindowEvent::Moved(position) => {
                     let sid = position_session_id.lock().unwrap().clone();
-                    if !sid.is_empty() && is_safe_session_id(&sid) {
-                        let path = default_pet_dir()
-                            .join("positions")
-                            .join(format!("{}.json", sid));
-                        write_window_position(&path, *position);
-                    }
+                    let positions_dir = default_pet_dir().join("positions");
+                    let _ = handle_window_moved_logic(window.label(), &sid, &positions_dir, *position);
                 }
                 tauri::WindowEvent::Destroyed => {
-                    if let Some(lock) = lock_for_cleanup.lock().unwrap().as_ref() {
-                        let _ = fs::remove_file(lock);
-                    }
+                    handle_window_destroyed_logic(
+                        window.label(),
+                        &lock_for_cleanup,
+                        &board_lock_for_cleanup.0,
+                    );
                     // Don't delete status file — it belongs to the session, not the pet
                 }
                 _ => {}

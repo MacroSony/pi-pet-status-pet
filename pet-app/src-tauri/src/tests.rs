@@ -1188,6 +1188,190 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn test_derive_team_board_lock_key_deterministic_across_caller_role_and_state() {
+        let team_a = crate::TeamPresentation {
+            name: "Release Crew".to_string(),
+            role: "leader".to_string(),
+            members: vec![
+                crate::TeamPresentationMember {
+                    display_name: "Builder · Pi".to_string(),
+                    role: "leader".to_string(),
+                    state: "editing".to_string(),
+                    host: "local".to_string(),
+                },
+                crate::TeamPresentationMember {
+                    display_name: "Reviewer · Pi".to_string(),
+                    role: "member".to_string(),
+                    state: "idle".to_string(),
+                    host: "homelab".to_string(),
+                },
+            ],
+            board: crate::TeamBoardPresentation {
+                status: "ready".to_string(),
+                revision: Some(1),
+                markdown: "# Plan A".to_string(),
+                updated_by: "Builder · Pi".to_string(),
+            },
+        };
+
+        // Same team viewed by another member: different caller role, different member states/roles, reversed order, different board content
+        let team_b = crate::TeamPresentation {
+            name: "Release Crew".to_string(),
+            role: "member".to_string(),
+            members: vec![
+                crate::TeamPresentationMember {
+                    display_name: "Reviewer · Pi".to_string(),
+                    role: "member".to_string(),
+                    state: "running".to_string(),
+                    host: "homelab".to_string(),
+                },
+                crate::TeamPresentationMember {
+                    display_name: "Builder · Pi".to_string(),
+                    role: "leader".to_string(),
+                    state: "thinking".to_string(),
+                    host: "local".to_string(),
+                },
+            ],
+            board: crate::TeamBoardPresentation {
+                status: "unavailable".to_string(),
+                revision: None,
+                markdown: "".to_string(),
+                updated_by: "".to_string(),
+            },
+        };
+
+        let key_a = crate::derive_team_board_lock_key(&team_a);
+        let key_b = crate::derive_team_board_lock_key(&team_b);
+        assert_eq!(key_a, key_b, "Lock keys must match across different caller roles, member states, and order");
+
+        // Team C with different team name
+        let mut team_c = team_a.clone();
+        team_c.name = "Different Crew".to_string();
+        let key_c = crate::derive_team_board_lock_key(&team_c);
+        assert_ne!(key_a, key_c, "Different team names must derive different lock keys");
+
+        // Team D with different member host
+        let mut team_d = team_a.clone();
+        team_d.members[1].host = "cloud".to_string();
+        let key_d = crate::derive_team_board_lock_key(&team_d);
+        assert_ne!(key_a, key_d, "Different member hosts must derive different lock keys");
+    }
+
+    #[test]
+    fn test_derive_team_board_lock_path_shared_directory() {
+        let status_dir = std::env::temp_dir().join(format!("test-status-dir-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&status_dir);
+        let status_file = status_dir.join("status-session-123.json");
+
+        let team = crate::TeamPresentation {
+            name: "QA Fleet".to_string(),
+            role: "leader".to_string(),
+            members: vec![crate::TeamPresentationMember {
+                display_name: "Tester".to_string(),
+                role: "leader".to_string(),
+                state: "idle".to_string(),
+                host: "host1".to_string(),
+            }],
+            board: crate::TeamBoardPresentation {
+                status: "ready".to_string(),
+                revision: Some(1),
+                markdown: "ok".to_string(),
+                updated_by: "Tester".to_string(),
+            },
+        };
+
+        let lock_path = crate::derive_team_board_lock_path(&status_file, &team);
+        assert_eq!(lock_path.parent(), Some(status_dir.as_path()));
+        let filename = lock_path.file_name().unwrap().to_string_lossy();
+        assert!(filename.starts_with("team-board-"));
+        assert!(filename.ends_with(".lock"));
+        assert!(!filename.contains("qa-fleet"), "Team names stay out of lock filenames");
+        let _ = std::fs::remove_dir_all(status_dir);
+    }
+
+    #[test]
+    fn test_team_board_lock_stale_and_active_recovery() {
+        let temp_dir = std::env::temp_dir().join(format!("test-board-lock-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let lock_path = temp_dir.join("team-board-test.lock");
+
+        // A stale owner is replaced by an exclusive claim.
+        std::fs::write(&lock_path, "99999999\n").unwrap();
+        assert!(!crate::is_lock_alive(&lock_path), "Dead PID must be detected as stale / not alive");
+        assert_eq!(crate::claim_board_lock(&lock_path).unwrap(), crate::BoardLockClaim::Acquired);
+        assert!(crate::is_lock_alive(&lock_path), "Current process PID must be alive");
+        let content = std::fs::read_to_string(&lock_path).unwrap();
+        assert_eq!(content.trim(), std::process::id().to_string());
+
+        // create_new prevents a second process path from overwriting a live claim.
+        assert_eq!(
+            crate::claim_board_lock(&lock_path).unwrap(),
+            crate::BoardLockClaim::HeldByLiveProcess,
+        );
+        assert_eq!(std::fs::read_to_string(&lock_path).unwrap().trim(), std::process::id().to_string());
+
+        let _ = std::fs::remove_file(&lock_path);
+        assert!(!crate::is_lock_alive(&lock_path));
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_window_moved_label_isolation() {
+        let temp_dir = std::env::temp_dir().join(format!("test-pos-dir-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let pos = tauri::PhysicalPosition::new(100, 200);
+
+        // Window label "team-board" must NOT persist pet position
+        let board_res = crate::handle_window_moved_logic("team-board", "safe-sid-1", &temp_dir, pos);
+        assert_eq!(board_res, None);
+        assert!(!temp_dir.join("safe-sid-1.json").exists());
+
+        // Window label "main" MUST persist pet position
+        let main_res = crate::handle_window_moved_logic("main", "safe-sid-1", &temp_dir, pos);
+        assert_eq!(main_res, Some(temp_dir.join("safe-sid-1.json")));
+        assert!(temp_dir.join("safe-sid-1.json").exists());
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_window_destroyed_label_isolation() {
+        let temp_dir = std::env::temp_dir().join(format!("test-destroy-dir-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let pet_lock_path = temp_dir.join("pet-test-sid.lock");
+        let board_lock_path = temp_dir.join("team-board-test.lock");
+        std::fs::write(&pet_lock_path, "123").unwrap();
+        std::fs::write(&board_lock_path, "456").unwrap();
+
+        let pet_lock_state = std::sync::Mutex::new(Some(pet_lock_path.clone()));
+        let board_lock_state = std::sync::Mutex::new(Some(board_lock_path.clone()));
+
+        // When "team-board" is destroyed, ONLY board lock is cleaned
+        let outcome = crate::handle_window_destroyed_logic(
+            "team-board",
+            &pet_lock_state,
+            &board_lock_state,
+        );
+        assert_eq!(outcome, crate::WindowDestroyOutcome::BoardLockCleaned(board_lock_path.clone()));
+        assert!(!board_lock_path.exists(), "Board lock file must be deleted");
+        assert!(board_lock_state.lock().unwrap().is_none(), "Board lock state must be None");
+        assert!(pet_lock_path.exists(), "Pet lock file must NOT be deleted by team-board destroy");
+        assert!(pet_lock_state.lock().unwrap().is_some(), "Pet lock state must remain intact");
+
+        // When "main" is destroyed, pet lock is cleaned
+        let outcome_main = crate::handle_window_destroyed_logic(
+            "main",
+            &pet_lock_state,
+            &board_lock_state,
+        );
+        assert_eq!(outcome_main, crate::WindowDestroyOutcome::PetLockCleaned(pet_lock_path.clone()));
+        assert!(!pet_lock_path.exists(), "Pet lock file must be deleted on main window destroy");
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
     // ── Helper ──
 
     fn make_stdin(
