@@ -44,6 +44,19 @@ describe("tauri.conf.json window configuration contract", () => {
     assert.ok(!capability.permissions.includes("core:window:allow-set-position"));
   });
 
+  it("gives the dynamic Pet Chat window a dedicated least-privilege capability", () => {
+    const capabilityPath = path.join(__dirname, "../src-tauri/capabilities/pet-chat.json");
+    const capability = JSON.parse(fs.readFileSync(capabilityPath, "utf-8"));
+    assert.deepStrictEqual(capability.windows, ["pet-chat"]);
+    assert.ok(capability.permissions.includes("core:default"));
+    assert.ok(capability.permissions.includes("core:event:allow-listen"));
+    assert.ok(capability.permissions.includes("core:window:allow-close"));
+    assert.ok(!capability.permissions.includes("core:event:allow-emit"));
+    assert.ok(!capability.permissions.includes("core:window:allow-start-dragging"));
+    assert.ok(!capability.permissions.includes("core:window:allow-set-position"));
+    assert.ok(!capability.permissions.includes("core:window:allow-set-size"));
+  });
+
   it("targets full status events to main and only Team projections to the Board", () => {
     const rust = fs.readFileSync(path.join(__dirname, "../src-tauri/src/lib.rs"), "utf-8");
     assert.match(rust, /emit_to\("main", "status-update", status\)/);

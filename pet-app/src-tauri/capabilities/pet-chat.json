@@ -1,0 +1,10 @@
+{
+  "identifier": "pet-chat",
+  "description": "Least privilege capabilities for the per-pet secondary chat window",
+  "windows": ["pet-chat"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:window:allow-close"
+  ]
+}

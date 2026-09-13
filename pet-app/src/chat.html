@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pi Pet Chat</title>
+  <link rel="stylesheet" href="chat.css">
+</head>
+<body>
+  <div class="chat-shell">
+    <header class="chat-header">
+      <div class="header-main">
+        <div class="eyebrow">PI PET CHAT</div>
+        <h1 id="chat-title">Pet Chat</h1>
+      </div>
+      <div class="header-actions">
+        <button id="clear-button" class="btn-clear" type="button" aria-label="Clear chat history">Clear</button>
+      </div>
+    </header>
+
+    <main id="messages-container" class="messages-container" tabindex="0" role="log" aria-live="polite">
+      <div id="chat-empty" class="chat-empty">No messages yet. Send a message to get started.</div>
+      <div id="chat-messages" class="chat-messages"></div>
+      <div id="chat-pending" class="pending-container" hidden aria-label="Thinking">
+        <div class="message-row assistant">
+          <div class="message-bubble assistant pending-bubble">
+            <span class="pending-dot"></span>
+            <span class="pending-dot"></span>
+            <span class="pending-dot"></span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="chat-input-area">
+      <div id="chat-error" class="chat-error" hidden role="alert"></div>
+      <div class="input-controls">
+        <textarea
+          id="chat-textarea"
+          class="chat-textarea"
+          placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
+          maxlength="2000"
+          rows="2"
+        ></textarea>
+        <button id="send-button" class="btn-send" type="button">Send</button>
+      </div>
+    </footer>
+  </div>
+  <script src="chat.js"></script>
+</body>
+</html>

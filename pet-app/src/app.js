@@ -1209,6 +1209,16 @@ function cancelPokePointer() {
   pokeGestureInvalid = true;
 }
 
+async function openPetChat() {
+  if (!window.__TAURI__?.core) return false;
+  try {
+    return !!(await window.__TAURI__.core.invoke('open_pet_chat'));
+  } catch (err) {
+    console.error('Failed to open pet chat:', err);
+    return false;
+  }
+}
+
 function handlePokeClick(event) {
   if (!isPokeTarget(event.target) || !pokeClickAllowed) return;
   pokeClickAllowed = false;
@@ -1218,6 +1228,7 @@ function handlePokeClick(event) {
     pokeClickTimer = null;
     lastPokeDoubleClickAt = Date.now();
     triggerPoke('shy');
+    openPetChat();
     return;
   }
 
@@ -1244,6 +1255,7 @@ function handlePokeDoubleClick(event) {
   pokeClickTimer = null;
   lastPokeDoubleClickAt = Date.now();
   triggerPoke('shy');
+  openPetChat();
 }
 
 function startPokeHover() {

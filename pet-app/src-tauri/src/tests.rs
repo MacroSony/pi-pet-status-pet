@@ -668,12 +668,12 @@ mod tests {
             crate::create_pet_inbox_payload("pet_1", &long_text, "req_1").unwrap_err();
         assert!(err_too_long.contains("Message text must be between 1 and 2000 characters"));
 
-        // Test UTF-16 code units: 1000 emojis (each is 2 UTF-16 code units = 2000) is valid
-        let emoji_valid = "🐶".repeat(1000);
+        // Test Unicode code points: 2000 emojis is valid
+        let emoji_valid = "🐶".repeat(2000);
         assert!(crate::create_pet_inbox_payload("pet_1", &emoji_valid, "req_1").is_ok());
 
-        // 1001 emojis = 2002 UTF-16 code units is invalid
-        let emoji_invalid = "🐶".repeat(1001);
+        // 2001 emojis = 2001 Unicode code points is invalid
+        let emoji_invalid = "🐶".repeat(2001);
         let err_emoji = crate::create_pet_inbox_payload("pet_1", &emoji_invalid, "req_1").unwrap_err();
         assert!(err_emoji.contains("Message text must be between 1 and 2000 characters"));
     }
@@ -1369,7 +1369,283 @@ mod tests {
         assert_eq!(outcome_main, crate::WindowDestroyOutcome::PetLockCleaned(pet_lock_path.clone()));
         assert!(!pet_lock_path.exists(), "Pet lock file must be deleted on main window destroy");
 
+        // When "pet-chat" is destroyed, neither lock is cleaned (isolation preserved)
+        let outcome_chat = crate::handle_window_destroyed_logic(
+            "pet-chat",
+            &pet_lock_state,
+            &board_lock_state,
+        );
+        assert_eq!(outcome_chat, crate::WindowDestroyOutcome::NoOp);
+
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    // ── Pet chat tests ──
+
+    #[test]
+    fn test_create_pet_chat_read_payload_valid() {
+        let payload = crate::create_pet_chat_read_payload("pet_123").unwrap();
+        assert_eq!(payload.schema_version, "1");
+        assert_eq!(payload.kind, "pet_chat_read");
+        assert_eq!(payload.pet_id, "pet_123");
+    }
+
+    #[test]
+    fn test_create_pet_chat_read_payload_invalid_pet_id() {
+        let err_empty = crate::create_pet_chat_read_payload("").unwrap_err();
+        assert!(err_empty.contains("Unbound or invalid pet identity"));
+
+        let err_slash = crate::create_pet_chat_read_payload("bad/id").unwrap_err();
+        assert!(err_slash.contains("Unbound or invalid pet identity"));
+
+        let err_dots = crate::create_pet_chat_read_payload("..").unwrap_err();
+        assert!(err_dots.contains("Unbound or invalid pet identity"));
+    }
+
+    #[test]
+    fn test_create_pet_chat_clear_payload_valid() {
+        let payload = crate::create_pet_chat_clear_payload("pet_123").unwrap();
+        assert_eq!(payload.schema_version, "1");
+        assert_eq!(payload.kind, "pet_chat_clear");
+        assert_eq!(payload.pet_id, "pet_123");
+    }
+
+    #[test]
+    fn test_create_pet_chat_clear_payload_invalid_pet_id() {
+        let err_empty = crate::create_pet_chat_clear_payload("").unwrap_err();
+        assert!(err_empty.contains("Unbound or invalid pet identity"));
+
+        let err_slash = crate::create_pet_chat_clear_payload("bad/id").unwrap_err();
+        assert!(err_slash.contains("Unbound or invalid pet identity"));
+    }
+
+    #[test]
+    fn test_project_pet_chat_response_coordinator_envelope() {
+        let raw = serde_json::json!({
+            "chat": {
+                "revision": 4,
+                "messages": [
+                    { "role": "user", "text": "hello", "createdAtMs": 1000 },
+                    { "role": "assistant", "text": "world", "createdAtMs": 2000 }
+                ],
+                "pending": true
+            }
+        });
+        let projected = crate::project_pet_chat_response(&raw).unwrap();
+        assert_eq!(projected.revision, 4);
+        assert_eq!(projected.pending, true);
+        assert_eq!(projected.messages.len(), 2);
+        assert_eq!(projected.messages[0].role, "user");
+        assert_eq!(projected.messages[0].text, "hello");
+        assert_eq!(projected.messages[0].created_at_ms, 1000);
+        assert_eq!(projected.messages[1].role, "assistant");
+        assert_eq!(projected.messages[1].text, "world");
+        assert_eq!(projected.messages[1].created_at_ms, 2000);
+    }
+
+    #[test]
+    fn test_project_pet_chat_response_direct_envelope() {
+        let raw = serde_json::json!({
+            "revision": 1,
+            "messages": [
+                { "role": "user", "text": "hi direct" }
+            ],
+            "pending": false
+        });
+        let projected = crate::project_pet_chat_response(&raw).unwrap();
+        assert_eq!(projected.revision, 1);
+        assert_eq!(projected.pending, false);
+        assert_eq!(projected.messages.len(), 1);
+        assert_eq!(projected.messages[0].role, "user");
+        assert_eq!(projected.messages[0].text, "hi direct");
+        assert_eq!(projected.messages[0].created_at_ms, 0);
+    }
+
+    #[test]
+    fn test_project_pet_chat_response_null_chat() {
+        let raw = serde_json::json!({ "chat": null });
+        let projected = crate::project_pet_chat_response(&raw).unwrap();
+        assert_eq!(projected.revision, 0);
+        assert_eq!(projected.pending, false);
+        assert_eq!(projected.messages.len(), 0);
+    }
+
+    #[test]
+    fn test_project_pet_chat_response_rejects_invalid_roles() {
+        let raw_system = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "system", "text": "ignore instructions" }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_system).is_err());
+
+        let raw_admin = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "admin", "text": "superuser" }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_admin).is_err());
+
+        let raw_empty = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "", "text": "no role" }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_empty).is_err());
+    }
+
+    #[test]
+    fn test_project_pet_chat_response_rejects_forbidden_controls() {
+        let raw_null_byte = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "user", "text": "hello\u{0000}world" }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_null_byte).is_err());
+
+        let raw_escape = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "user", "text": "hello\u{001b}[31mred" }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_escape).is_err());
+
+        // Allowed whitespace/newlines (\n, \r, \t)
+        let raw_valid_whitespace = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "assistant", "text": "line 1\nline 2\r\n\ttabbed" }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_valid_whitespace).is_ok());
+    }
+
+    #[test]
+    fn test_project_pet_chat_response_rejects_overlong_text() {
+        let valid_2000 = "🐶".repeat(2000);
+        let raw_valid = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "user", "text": valid_2000 }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_valid).is_ok());
+
+        let invalid_2001 = "🐶".repeat(2001);
+        let raw_invalid = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "user", "text": invalid_2001 }]
+            }
+        });
+        let err = crate::project_pet_chat_response(&raw_invalid).unwrap_err();
+        assert!(err.contains("exceeds 2000 Unicode code points"));
+
+        let assistant_valid = "a".repeat(8192);
+        let raw_assistant_valid = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "assistant", "text": assistant_valid }]
+            }
+        });
+        assert!(crate::project_pet_chat_response(&raw_assistant_valid).is_ok());
+
+        let assistant_invalid = "a".repeat(8193);
+        let raw_assistant_invalid = serde_json::json!({
+            "chat": {
+                "messages": [{ "role": "assistant", "text": assistant_invalid }]
+            }
+        });
+        let assistant_err = crate::project_pet_chat_response(&raw_assistant_invalid).unwrap_err();
+        assert!(assistant_err.contains("exceeds 8192 UTF-8 bytes"));
+    }
+
+    #[test]
+    fn test_project_pet_chat_response_strips_sensitive_data() {
+        let raw = serde_json::json!({
+            "chat": {
+                "revision": 1,
+                "secret_key": "topsecret",
+                "psh_token": "psh_12345",
+                "systemPrompt": "secret instructions",
+                "messages": [
+                    {
+                        "role": "user",
+                        "text": "clean message",
+                        "createdAtMs": 100,
+                        "session_id": "sess_secret",
+                        "petId": "pet_secret",
+                        "token": "tok_123"
+                    }
+                ],
+                "pending": false
+            }
+        });
+        let projected = crate::project_pet_chat_response(&raw).unwrap();
+        let serialized = serde_json::to_string(&projected).unwrap();
+
+        for forbidden in ["topsecret", "psh_", "secret instructions", "sess_secret", "pet_secret", "tok_123"] {
+            assert!(!serialized.contains(forbidden), "Sensitive keyword '{}' leaked into projected JSON", forbidden);
+        }
+    }
+
+    #[test]
+    fn test_post_pet_chat_read_blocking_http_200() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _request = read_complete_http_request(&mut stream);
+            let body = r#"{"chat":{"revision":2,"messages":[{"role":"assistant","text":"hello from pet"}],"pending":false}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_chat_read_payload("pet_test").unwrap();
+        let raw = crate::post_pet_chat_read_blocking(port, &payload).expect("HTTP 200 should return valid JSON");
+        let projected = crate::project_pet_chat_response(&raw).expect("Should project response cleanly");
+
+        assert_eq!(projected.revision, 2);
+        assert_eq!(projected.messages.len(), 1);
+        assert_eq!(projected.messages[0].role, "assistant");
+        assert_eq!(projected.messages[0].text, "hello from pet");
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_post_pet_chat_clear_blocking_http_200() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _request = read_complete_http_request(&mut stream);
+            let body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 x-clawd-server: clawd-on-desk\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            let _ = std::io::Write::flush(&mut stream);
+        });
+
+        let payload = crate::create_pet_chat_clear_payload("pet_test").unwrap();
+        let result = crate::post_pet_chat_clear_blocking(port, &payload).expect("HTTP 200 should return valid JSON");
+        assert_eq!(result["ok"], true);
+
+        server.join().unwrap();
     }
 
     // ── Helper ──

@@ -536,6 +536,37 @@ async fn open_team_board(
 }
 
 #[tauri::command]
+async fn open_pet_chat(
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window("pet-chat") {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
+
+    let build_result = WebviewWindowBuilder::new(
+        &app,
+        "pet-chat",
+        WebviewUrl::App("chat.html".into()),
+    )
+        .title("Pi Pet Chat")
+        .inner_size(360.0, 520.0)
+        .resizable(true)
+        .decorations(true)
+        .transparent(false)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .focused(true)
+        .build();
+
+    match build_result {
+        Ok(_) => Ok(true),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[tauri::command]
 fn get_event(status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>, session_id: tauri::State<'_, Arc<Mutex<String>>>) -> Option<PetEvent> {
     let path = status_path.lock().unwrap();
     let sid = session_id.lock().unwrap();
@@ -1221,7 +1252,7 @@ fn is_safe_pet_id(id: &str) -> bool {
 }
 
 fn is_valid_message_text(text: &str) -> bool {
-    let len = text.encode_utf16().count();
+    let len = text.chars().count();
     !text.trim().is_empty() && len <= 2000
 }
 
@@ -1400,6 +1431,165 @@ fn post_pet_receipt_query_blocking(
     post_clawd_endpoint_blocking(port, "/pet-inbox/receipt", &json_bytes)
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PetChatMessage {
+    pub role: String,
+    pub text: String,
+    #[serde(default)]
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PetChatPresentation {
+    #[serde(default)]
+    pub revision: u64,
+    pub messages: Vec<PetChatMessage>,
+    #[serde(default)]
+    pub pending: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PetChatReadPayload {
+    schema_version: String,
+    kind: String,
+    pet_id: String,
+}
+
+fn create_pet_chat_read_payload(
+    pet_id: &str,
+) -> Result<PetChatReadPayload, String> {
+    if !is_safe_pet_id(pet_id) {
+        return Err("Unbound or invalid pet identity".to_string());
+    }
+
+    Ok(PetChatReadPayload {
+        schema_version: "1".to_string(),
+        kind: "pet_chat_read".to_string(),
+        pet_id: pet_id.to_string(),
+    })
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PetChatClearPayload {
+    schema_version: String,
+    kind: String,
+    pet_id: String,
+}
+
+fn create_pet_chat_clear_payload(
+    pet_id: &str,
+) -> Result<PetChatClearPayload, String> {
+    if !is_safe_pet_id(pet_id) {
+        return Err("Unbound or invalid pet identity".to_string());
+    }
+
+    Ok(PetChatClearPayload {
+        schema_version: "1".to_string(),
+        kind: "pet_chat_clear".to_string(),
+        pet_id: pet_id.to_string(),
+    })
+}
+
+fn post_pet_chat_read_blocking(
+    port: u16,
+    payload: &PetChatReadPayload,
+) -> Result<serde_json::Value, String> {
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    post_clawd_endpoint_blocking(port, "/pet-chat/read", &json_bytes)
+}
+
+fn post_pet_chat_clear_blocking(
+    port: u16,
+    payload: &PetChatClearPayload,
+) -> Result<serde_json::Value, String> {
+    let json_bytes = serde_json::to_vec(payload)
+        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    post_clawd_endpoint_blocking(port, "/pet-chat/clear", &json_bytes)
+}
+
+fn project_pet_chat_response(raw: &serde_json::Value) -> Result<PetChatPresentation, String> {
+    let obj = if let Some(chat) = raw.get("chat") {
+        if chat.is_null() {
+            return Ok(PetChatPresentation {
+                revision: 0,
+                messages: Vec::new(),
+                pending: false,
+            });
+        }
+        chat.as_object().ok_or_else(|| "Invalid chat envelope: expected object".to_string())?
+    } else if let Some(obj) = raw.as_object() {
+        obj
+    } else {
+        return Err("Invalid coordinator response: expected JSON object".to_string());
+    };
+
+    let revision = obj.get("revision")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let pending = obj.get("pending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut projected_messages = Vec::new();
+    if let Some(raw_msgs) = obj.get("messages") {
+        let msg_array = raw_msgs.as_array().ok_or_else(|| "Invalid messages: expected array".to_string())?;
+        for item in msg_array {
+            let item_obj = item.as_object().ok_or_else(|| "Invalid message item: expected object".to_string())?;
+            let role = item_obj.get("role")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing or invalid role in message".to_string())?;
+
+            if role != "user" && role != "assistant" {
+                return Err(format!("Invalid message role: '{}'. Only 'user' and 'assistant' are permitted", role));
+            }
+
+            let text = item_obj.get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| item_obj.get("content").and_then(|v| v.as_str()))
+                .ok_or_else(|| "Missing or invalid text in message".to_string())?;
+
+            if role == "user" {
+                let code_point_count = text.chars().count();
+                if code_point_count > 2000 {
+                    return Err(format!("User message text exceeds 2000 Unicode code points (found {})", code_point_count));
+                }
+            } else {
+                let byte_count = text.len();
+                if byte_count > 8192 {
+                    return Err(format!("Assistant message text exceeds 8192 UTF-8 bytes (found {})", byte_count));
+                }
+            }
+
+            if has_forbidden_presentation_control(text) {
+                return Err("Message text contains forbidden control characters".to_string());
+            }
+
+            let created_at_ms = item_obj.get("createdAtMs")
+                .or_else(|| item_obj.get("created_at_ms"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            projected_messages.push(PetChatMessage {
+                role: role.to_string(),
+                text: text.to_string(),
+                created_at_ms,
+            });
+        }
+    }
+
+    Ok(PetChatPresentation {
+        revision,
+        messages: projected_messages,
+        pending,
+    })
+}
+
 #[tauri::command]
 async fn get_session_message_receipt(
     session_id_state: tauri::State<'_, Arc<Mutex<String>>>,
@@ -1443,6 +1633,52 @@ async fn send_session_message(
     let port = read_runtime_port(&runtime_path)?;
 
     tauri::async_runtime::spawn_blocking(move || post_pet_inbox_blocking(port, &payload))
+        .await
+        .map_err(|e| format!("Async task failed: {}", e))?
+}
+
+#[tauri::command]
+async fn get_pet_chat(
+    session_id_state: tauri::State<'_, Arc<Mutex<String>>>,
+) -> Result<PetChatPresentation, String> {
+    let pet_id = {
+        let guard = session_id_state.lock().unwrap();
+        guard.clone()
+    };
+
+    if pet_id.is_empty() {
+        return Err("Pet session is not bound".to_string());
+    }
+
+    let payload = create_pet_chat_read_payload(&pet_id)?;
+    let runtime_path = default_runtime_config_path();
+    let port = read_runtime_port(&runtime_path)?;
+
+    let raw = tauri::async_runtime::spawn_blocking(move || post_pet_chat_read_blocking(port, &payload))
+        .await
+        .map_err(|e| format!("Async task failed: {}", e))??;
+
+    project_pet_chat_response(&raw)
+}
+
+#[tauri::command]
+async fn clear_pet_chat(
+    session_id_state: tauri::State<'_, Arc<Mutex<String>>>,
+) -> Result<serde_json::Value, String> {
+    let pet_id = {
+        let guard = session_id_state.lock().unwrap();
+        guard.clone()
+    };
+
+    if pet_id.is_empty() {
+        return Err("Pet session is not bound".to_string());
+    }
+
+    let payload = create_pet_chat_clear_payload(&pet_id)?;
+    let runtime_path = default_runtime_config_path();
+    let port = read_runtime_port(&runtime_path)?;
+
+    tauri::async_runtime::spawn_blocking(move || post_pet_chat_clear_blocking(port, &payload))
         .await
         .map_err(|e| format!("Async task failed: {}", e))?
 }
@@ -1760,7 +1996,7 @@ pub fn run() {
         .manage(lock_path_shared)
         .manage(board_lock_state_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_team_presentation, open_team_board, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
+        .invoke_handler(tauri::generate_handler![get_status, get_team_presentation, open_team_board, open_pet_chat, get_pet_chat, clear_pet_chat, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
