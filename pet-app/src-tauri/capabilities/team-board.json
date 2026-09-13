@@ -1,0 +1,10 @@
+{
+  "identifier": "team-board",
+  "description": "Minimal capabilities for the read-only Pi Pet Team Board window",
+  "windows": ["team-board"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:window:allow-close"
+  ]
+}

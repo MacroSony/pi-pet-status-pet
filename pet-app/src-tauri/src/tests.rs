@@ -1113,6 +1113,81 @@ mod tests {
         server.join().unwrap();
     }
 
+    // ── Team presentation / Board projection ──
+
+    #[test]
+    fn test_read_status_accepts_bounded_team_projection_and_drops_unknown_ids() {
+        let path = std::env::temp_dir().join(format!("pi-pet-team-status-{}.json", std::process::id()));
+        let raw = serde_json::json!({
+            "state": "idle",
+            "detail": "Waiting",
+            "tool": "",
+            "event": "",
+            "session_id": "pet_internal",
+            "session_name": "Builder · Pi",
+            "team": {
+                "name": "Release Crew",
+                "role": "leader",
+                "teamId": "team_must_not_escape",
+                "members": [{
+                    "displayName": "Builder · Pi",
+                    "role": "leader",
+                    "state": "idle",
+                    "host": "local",
+                    "petId": "pet_must_not_escape",
+                    "handle": "psh_must_not_escape"
+                }],
+                "board": {
+                    "status": "ready",
+                    "revision": 2,
+                    "markdown": "# Plan\n<script>not html</script>",
+                    "updatedBy": "Builder · Pi"
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let status = crate::read_status(&path).unwrap();
+        let team = status.team.unwrap();
+        assert_eq!(team.name, "Release Crew");
+        assert_eq!(team.board.revision, Some(2));
+        let projected = serde_json::to_string(&team).unwrap();
+        assert!(!projected.contains("team_must_not_escape"));
+        assert!(!projected.contains("pet_must_not_escape"));
+        assert!(!projected.contains("psh_must_not_escape"));
+        assert!(projected.contains("<script>not html</script>"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_read_status_rejects_invalid_team_projection_without_losing_pet_status() {
+        let path = std::env::temp_dir().join(format!("pi-pet-bad-team-status-{}.json", std::process::id()));
+        let members: Vec<_> = (0..9).map(|index| serde_json::json!({
+            "displayName": format!("Member {}", index),
+            "role": "member",
+            "state": "idle",
+            "host": "local"
+        })).collect();
+        let raw = serde_json::json!({
+            "state": "editing",
+            "detail": "Working",
+            "tool": "edit",
+            "event": "PreToolUse",
+            "session_id": "pet_internal",
+            "session_name": "Builder · Pi",
+            "team": {
+                "name": "Too Large",
+                "role": "leader",
+                "members": members,
+                "board": { "status": "ready", "revision": 1, "markdown": "", "updatedBy": "" }
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let status = crate::read_status(&path).unwrap();
+        assert_eq!(status.state, "editing");
+        assert!(status.team.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
     // ── Helper ──
 
     fn make_stdin(

@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager, PhysicalPosition, Position};
+use tauri::{Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWindowBuilder};
 
 pub mod adapter;
 pub mod status_map;
@@ -53,6 +53,33 @@ fn debug_log(path: &PathBuf, msg: &str) {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TeamPresentationMember {
+    display_name: String,
+    role: String,
+    state: String,
+    host: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TeamBoardPresentation {
+    status: String,
+    revision: Option<u64>,
+    markdown: String,
+    updated_by: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TeamPresentation {
+    name: String,
+    role: String,
+    members: Vec<TeamPresentationMember>,
+    board: TeamBoardPresentation,
+}
+
 #[derive(Clone, Serialize)]
 struct StatusPayload {
     state: String,
@@ -61,6 +88,13 @@ struct StatusPayload {
     event: String,
     session_id: String,
     session_name: String,
+    team: Option<TeamPresentation>,
+}
+
+fn emit_status_update(handle: &tauri::AppHandle, status: StatusPayload) {
+    let team = status.team.clone();
+    let _ = handle.emit_to("main", "status-update", status);
+    let _ = handle.emit_to("team-board", "team-presentation-update", team);
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -163,6 +197,10 @@ fn default_status_path() -> PathBuf {
 fn read_status(path: &PathBuf) -> Option<StatusPayload> {
     let content = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let team = v.get("team")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value::<TeamPresentation>(value.clone()).ok())
+        .filter(is_valid_team_presentation);
     Some(StatusPayload {
         state: v["state"].as_str().unwrap_or("idle").to_string(),
         detail: v["detail"].as_str().unwrap_or("").to_string(),
@@ -170,7 +208,52 @@ fn read_status(path: &PathBuf) -> Option<StatusPayload> {
         event: v["event"].as_str().unwrap_or("").to_string(),
         session_id: v["session_id"].as_str().unwrap_or("").to_string(),
         session_name: v["session_name"].as_str().unwrap_or("").to_string(),
+        team,
     })
+}
+
+fn has_forbidden_presentation_control(value: &str) -> bool {
+    value.chars().any(|ch| matches!(ch as u32, 0..=8 | 11 | 12 | 14..=31 | 127..=159))
+}
+
+fn valid_bounded_single_line(value: &str, max_chars: usize) -> bool {
+    !value.chars().any(|ch| ch.is_control()) && value.chars().count() <= max_chars
+}
+
+fn is_valid_team_presentation(team: &TeamPresentation) -> bool {
+    const ROLES: [&str; 3] = ["leader", "member", "observer"];
+    const STATES: [&str; 11] = [
+        "idle", "thinking", "reading", "editing", "searching", "running",
+        "delegating", "waiting", "error", "closed", "offline",
+    ];
+    if team.name.trim().is_empty() || !valid_bounded_single_line(&team.name, 80) || !ROLES.contains(&team.role.as_str()) {
+        return false;
+    }
+    if team.members.is_empty() || team.members.len() > 8 {
+        return false;
+    }
+    for member in &team.members {
+        if member.display_name.trim().is_empty()
+            || !valid_bounded_single_line(&member.display_name, 120)
+            || !valid_bounded_single_line(&member.host, 80)
+            || !ROLES.contains(&member.role.as_str())
+            || !STATES.contains(&member.state.as_str())
+        {
+            return false;
+        }
+    }
+    if !matches!(team.board.status.as_str(), "ready" | "unavailable")
+        || !valid_bounded_single_line(&team.board.updated_by, 120)
+        || team.board.markdown.len() > 8192
+        || has_forbidden_presentation_control(&team.board.markdown)
+    {
+        return false;
+    }
+    match team.board.status.as_str() {
+        "ready" => team.board.revision.is_some(),
+        "unavailable" => team.board.revision.is_none() && team.board.markdown.is_empty(),
+        _ => false,
+    }
 }
 
 fn default_pi_pet_dir() -> PathBuf {
@@ -264,6 +347,46 @@ fn read_reaction(path: &PathBuf, log_path: &PathBuf) -> Option<ReactionPayload> 
 fn get_status(status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>) -> Option<StatusPayload> {
     let path = status_path.lock().unwrap();
     read_status(&path)
+}
+
+#[tauri::command]
+fn get_team_presentation(status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>) -> Option<TeamPresentation> {
+    let path = status_path.lock().unwrap();
+    read_status(&path).and_then(|status| status.team)
+}
+
+#[tauri::command]
+fn open_team_board(
+    app: tauri::AppHandle,
+    status_path: tauri::State<'_, Arc<Mutex<PathBuf>>>,
+) -> Result<bool, String> {
+    let has_team = {
+        let path = status_path.lock().map_err(|_| "status path unavailable".to_string())?;
+        read_status(&path).and_then(|status| status.team).is_some()
+    };
+    if !has_team {
+        return Ok(false);
+    }
+
+    if let Some(window) = app.get_webview_window("team-board") {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(true);
+    }
+
+    WebviewWindowBuilder::new(&app, "team-board", WebviewUrl::App("board.html".into()))
+        .title("Pi Pet Team Board")
+        .inner_size(520.0, 620.0)
+        .min_inner_size(380.0, 420.0)
+        .resizable(true)
+        .decorations(true)
+        .transparent(false)
+        .always_on_top(false)
+        .skip_taskbar(false)
+        .focused(true)
+        .build()
+        .map_err(|error| error.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -392,9 +515,9 @@ fn bind_session(
         }
     }
 
-    // Emit initial status
+    // Emit initial status only to the pet; the Board receives the ID-free Team projection.
     if let Some(status) = read_status(&status_file) {
-        let _ = app.emit("status-update", status);
+        emit_status_update(&app, status);
     }
 
     // Start file watcher in a background thread. Both files live in the same
@@ -469,7 +592,7 @@ fn bind_session(
                         } else if is_status_file {
                             if let Some(status) = read_status(&watch_path) {
                                 debug_log(&log_path, &format!("bind_session emit: state={}, detail={}", status.state, status.detail));
-                                let _ = handle.emit("status-update", status);
+                                emit_status_update(&handle, status);
                             }
                         }
                     }
@@ -480,16 +603,17 @@ fn bind_session(
                         }
                         if watch_path.exists() {
                             if let Some(status) = read_status(&watch_path) {
-                                let _ = handle.emit("status-update", status);
+                                emit_status_update(&handle, status);
                             }
                         } else {
-                            let _ = handle.emit("status-update", StatusPayload {
+                            emit_status_update(&handle, StatusPayload {
                                 state: "closed".to_string(),
                                 detail: "Session ended".to_string(),
                                 tool: String::new(),
                                 event: "SessionEnd".to_string(),
                                 session_id: String::new(),
                                 session_name: String::new(),
+                                team: None,
                             });
                         }
                     }
@@ -1487,7 +1611,7 @@ pub fn run() {
         .manage(session_id_shared)
         .manage(lock_path_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
+        .invoke_handler(tauri::generate_handler![get_status, get_team_presentation, open_team_board, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
@@ -1555,13 +1679,14 @@ pub fn run() {
                     let mut i = 0;
                     loop {
                         let (state, detail) = demos[i % demos.len()];
-                        let _ = handle.emit("status-update", StatusPayload {
+                        emit_status_update(&handle, StatusPayload {
                             state: state.to_string(),
                             detail: detail.to_string(),
                             tool: String::new(),
                             event: "Demo".to_string(),
                             session_id: "demo".to_string(),
                             session_name: "Demo Mode".to_string(),
+                            team: None,
                         });
                         i += 1;
                         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -1607,7 +1732,7 @@ pub fn run() {
 
                 if let Some(status) = read_status(&watch_path) {
                     debug_log(&log_path, &format!("Initial status: state={}", status.state));
-                    let _ = handle.emit("status-update", status);
+                    emit_status_update(&handle, status);
                 }
                 if let Some(event) = read_pet_event(&event_path, &log_path) {
                     debug_log(&log_path, &format!("Initial pet event: id={}", event.event_id));
@@ -1636,7 +1761,7 @@ pub fn run() {
                                     }
                                 } else if let Some(status) = read_status(&watch_path) {
                                     debug_log(&log_path, &format!("Emit: state={}, detail={}", status.state, status.detail));
-                                    let _ = handle.emit("status-update", status);
+                                    emit_status_update(&handle, status);
                                 } else {
                                     debug_log(&log_path, "Read failed after Modify/Create (file may be mid-write)");
                                 }
@@ -1648,12 +1773,12 @@ pub fn run() {
                                     debug_log(&log_path, "File still exists after Remove — spurious event (Windows writeFileSync), reading status");
                                     if let Some(status) = read_status(&watch_path) {
                                         debug_log(&log_path, &format!("Emit after spurious Remove: state={}, detail={}", status.state, status.detail));
-                                        let _ = handle.emit("status-update", status);
+                                        emit_status_update(&handle, status);
                                     }
                                 } else {
                                     debug_log(&log_path, "File truly deleted — emitting closed state");
-                                    let _ = handle.emit(
-                                        "status-update",
+                                    emit_status_update(
+                                        &handle,
                                         StatusPayload {
                                             state: "closed".to_string(),
                                             detail: "Session ended".to_string(),
@@ -1661,6 +1786,7 @@ pub fn run() {
                                             event: "SessionEnd".to_string(),
                                             session_id: String::new(),
                                             session_name: String::new(),
+                                            team: None,
                                         },
                                     );
                                 }

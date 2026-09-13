@@ -6,6 +6,9 @@ const stateGem = document.getElementById('state-gem');
 const stateGemTip = document.getElementById('state-gem-tip');
 const stateLabel = document.getElementById('state-label');
 const sessionNameEl = document.getElementById('session-name');
+const teamBadge = document.getElementById('team-badge');
+const teamBadgeCount = document.getElementById('team-badge-count');
+const teamBadgeTip = document.getElementById('team-badge-tip');
 const container = document.getElementById('pet-container');
 const artStage = document.getElementById('art-stage');
 const imgWrapper = document.getElementById('ferris-wrapper');
@@ -1074,7 +1077,7 @@ function triggerPoke(emotion) {
 
 function isPokeTarget(target) {
   if (!target || !artStage.contains(target)) return false;
-  return !target.closest('#state-gem, #speech-bubble, #char-menu, #menu-backdrop, #session-name');
+  return !target.closest('#state-gem, #speech-bubble, #char-menu, #menu-backdrop, #session-name, #team-badge');
 }
 
 function markPokePointerMoved(event) {
@@ -1324,6 +1327,36 @@ watchdogTimer = setInterval(checkWatchdog, WATCHDOG_INTERVAL_MS);
 
 // ── Main update ──
 
+function updateTeamBadge(team) {
+  if (!teamBadge) return false;
+  const valid = team && typeof team === 'object'
+    && typeof team.name === 'string'
+    && ['leader', 'member', 'observer'].includes(team.role)
+    && Array.isArray(team.members)
+    && team.members.length > 0;
+  teamBadge.hidden = !valid;
+  if (!valid) {
+    if (teamBadgeCount) teamBadgeCount.textContent = '';
+    if (teamBadgeTip) teamBadgeTip.textContent = '';
+    teamBadge.removeAttribute('data-role');
+    return false;
+  }
+  teamBadge.dataset.role = team.role;
+  if (teamBadgeCount) teamBadgeCount.textContent = String(Math.min(team.members.length, 8));
+  if (teamBadgeTip) teamBadgeTip.textContent = `${team.name} · ${team.role}`;
+  teamBadge.setAttribute('aria-label', `Open ${team.name} Team Board`);
+  return true;
+}
+
+async function openTeamBoard() {
+  if (!teamBadge || teamBadge.hidden || !window.__TAURI__?.core) return false;
+  try {
+    return !!(await window.__TAURI__.core.invoke('open_team_board'));
+  } catch {
+    return false;
+  }
+}
+
 function updateStatus(status, isRealEvent = false) {
   if (isRealEvent) {
     lastStatusEventAt = Date.now();
@@ -1353,6 +1386,7 @@ function updateStatus(status, isRealEvent = false) {
     bubbleTimeout = null;
   }
   latestStatus = status;
+  updateTeamBadge(status.team || null);
 
   if (state === 'closed' && window.__TAURI__) {
     window.__TAURI__.window.getCurrentWindow().close();
@@ -1990,6 +2024,16 @@ for (const el of [imgWrapper, asciiPre, bubble, stateLabel]) {
 // Poke tracking deliberately lives beside (rather than inside) the drag
 // handler. Native Tauri dragging still starts on mousedown, while the
 // movement/hold record decides whether the resulting mouseup is a click.
+if (teamBadge) {
+  teamBadge.addEventListener('pointerdown', (event) => event.stopPropagation());
+  teamBadge.addEventListener('mousedown', (event) => event.stopPropagation());
+  teamBadge.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openTeamBoard();
+  });
+}
+
 artStage.addEventListener('pointerdown', beginPokePointer);
 artStage.addEventListener('mousedown', beginPokePointer);
 window.addEventListener('pointermove', markPokePointerMoved);

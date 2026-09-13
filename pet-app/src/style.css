@@ -137,6 +137,64 @@ html, body {
 }
 #pet-container[data-identity="hidden"] #session-name { display: none; }
 
+/* Team badge: presentation-only entry point for the read-only Board window. */
+#team-badge {
+  position: absolute;
+  z-index: 4;
+  top: 2px;
+  right: 1px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 27px;
+  height: 24px;
+  border: 1.5px solid rgba(255, 255, 255, 0.82);
+  border-radius: 999px;
+  padding: 0 7px;
+  background: linear-gradient(135deg, rgba(118, 72, 190, 0.96), rgba(220, 91, 151, 0.94));
+  box-shadow: 0 3px 10px rgba(54, 22, 90, 0.35);
+  color: white;
+  cursor: pointer;
+  font: 700 10px/1 'Fredoka', 'Segoe UI', sans-serif;
+  pointer-events: auto;
+}
+
+#team-badge[hidden] { display: none !important; }
+#team-badge:hover { transform: translateY(-1px); filter: brightness(1.08); }
+#team-badge:active { transform: translateY(0); }
+.team-badge-mark { font-size: 11px; }
+#team-badge-count { min-width: 7px; }
+
+#team-badge-tip {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: max-content;
+  max-width: 170px;
+  border: 1px solid rgba(126, 78, 190, 0.3);
+  border-radius: 7px;
+  padding: 4px 7px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.18);
+  color: #392b46;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.25;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  text-overflow: ellipsis;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  white-space: nowrap;
+}
+
+#team-badge:hover #team-badge-tip,
+#team-badge:focus-visible #team-badge-tip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 /* State gem indicator */
 #state-gem {
   --gem-color: #e06c3c;

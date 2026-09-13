@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pi Pet Team Board</title>
+  <link rel="stylesheet" href="board.css">
+</head>
+<body>
+  <main class="board-shell">
+    <header class="board-header">
+      <div>
+        <div class="eyebrow">PI PET TEAM</div>
+        <h1 id="team-name">Team Board</h1>
+      </div>
+      <span id="caller-role" class="role-chip"></span>
+    </header>
+
+    <section class="panel" aria-labelledby="members-heading">
+      <div class="section-heading">
+        <h2 id="members-heading">Members</h2>
+        <span id="member-count" class="muted"></span>
+      </div>
+      <div id="member-list" class="member-list"></div>
+    </section>
+
+    <section class="panel board-panel" aria-labelledby="board-heading">
+      <div class="section-heading">
+        <h2 id="board-heading">Shared Board</h2>
+        <span id="board-revision" class="revision-chip"></span>
+      </div>
+      <div id="board-attribution" class="muted"></div>
+      <pre id="board-markdown" tabindex="0"></pre>
+      <div id="board-unavailable" class="empty-state" hidden>Board is temporarily unavailable.</div>
+    </section>
+
+    <div id="team-unavailable" class="team-unavailable" hidden>
+      This pet is no longer in an active Team.
+    </div>
+  </main>
+  <script src="board.js"></script>
+</body>
+</html>

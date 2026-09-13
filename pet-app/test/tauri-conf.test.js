@@ -32,4 +32,22 @@ describe("tauri.conf.json window configuration contract", () => {
     assert.strictEqual(mainWindow.alwaysOnTop, true, "alwaysOnTop must be true");
     assert.strictEqual(mainWindow.skipTaskbar, true, "skipTaskbar must be true");
   });
+
+  it("gives the dynamic Team Board window a dedicated minimal capability", () => {
+    const capabilityPath = path.join(__dirname, "../src-tauri/capabilities/team-board.json");
+    const capability = JSON.parse(fs.readFileSync(capabilityPath, "utf-8"));
+    assert.deepStrictEqual(capability.windows, ["team-board"]);
+    assert.ok(capability.permissions.includes("core:event:allow-listen"));
+    assert.ok(capability.permissions.includes("core:window:allow-close"));
+    assert.ok(!capability.permissions.includes("core:event:allow-emit"));
+    assert.ok(!capability.permissions.includes("core:window:allow-start-dragging"));
+    assert.ok(!capability.permissions.includes("core:window:allow-set-position"));
+  });
+
+  it("targets full status events to main and only Team projections to the Board", () => {
+    const rust = fs.readFileSync(path.join(__dirname, "../src-tauri/src/lib.rs"), "utf-8");
+    assert.match(rust, /emit_to\("main", "status-update", status\)/);
+    assert.match(rust, /emit_to\("team-board", "team-presentation-update", team\)/);
+    assert.doesNotMatch(rust, /\.emit\("status-update"/);
+  });
 });
