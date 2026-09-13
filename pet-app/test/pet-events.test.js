@@ -59,6 +59,18 @@ describe("reaction asset candidates", () => {
     assert.ok(candidates.includes("pet/reaction_happy.png"));
   });
 
+  it("keeps convention fallback when a custom pack omits reactions", () => {
+    const candidates = getReactionAssetCandidates(
+      { states: { idle: ["mika/idle.webp"] } },
+      "mika",
+      "drag",
+    );
+    assert.strictEqual(candidates[0], "mika/reaction_drag.webp");
+    assert.ok(candidates.includes("mika/reaction_drag.gif"));
+    assert.ok(candidates.includes("mika/reaction_drag.svg"));
+    assert.ok(candidates.includes("mika/reaction_drag.png"));
+  });
+
   it("maps every public Ferris emotion and drag to an existing bundled asset", () => {
     const config = JSON.parse(fs.readFileSync(path.join(__dirname, "../src/ferris/character.json"), "utf8"));
     for (const emotion of [...VALID_EMOTIONS, "drag"]) {

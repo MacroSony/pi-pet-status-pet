@@ -386,11 +386,14 @@ const POKE_COOLDOWN_MS = 4000;
 const POKE_HOVER_MS = 3000;
 const POKE_CLICK_HOLD_MS = 300;
 const POKE_CLICK_DISTANCE = 5;
+const NATIVE_DRAG_IDLE_MS = 300;
+const NATIVE_DRAG_SAFETY_MS = 1500;
 let pokeCooldownUntil = 0;
 let pokeHoverTimer = null;
 let pokeHoverTriggered = false;
 let pokePointer = null;
 let dragSession = null;
+let nativeDragEndTimer = null;
 let pokeClickAllowed = false;
 let pokeGestureInvalid = false;
 let pokeClickTimer = null;
@@ -400,7 +403,8 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function startDrag() {
+function startDrag(event) {
+  if (event && event.button !== undefined && event.button !== 0) return;
   if (window.__TAURI__) window.__TAURI__.window.getCurrentWindow().startDragging();
 }
 
@@ -1101,7 +1105,6 @@ async function beginPokeDrag(pointer, session) {
   // Drag reactions are optional. Keep the animation that was already playing
   // when no drag asset exists.
   if (!reactionPath || dragSession !== session) {
-    if (dragSession === session) dragSession = null;
     session.active = false;
     return;
   }
@@ -1123,12 +1126,30 @@ async function beginPokeDrag(pointer, session) {
   setImage(reactionPath);
 }
 
+function scheduleNativeDragFinish(session, delayMs = NATIVE_DRAG_IDLE_MS) {
+  clearTimeout(nativeDragEndTimer);
+  nativeDragEndTimer = setTimeout(() => {
+    nativeDragEndTimer = null;
+    finishPokeDrag(session);
+    if (pokePointer && pokePointer.dragSession === session) {
+      clearTimeout(pokePointer.holdTimer);
+      pokePointer = null;
+      pokeClickAllowed = false;
+      pokeGestureInvalid = true;
+    }
+  }, delayMs);
+}
+
 function maybeStartPokeDrag() {
   const pointer = pokePointer;
-  if (!pointer || pointer.dragStarted || !pointer.moved || !pointer.held) return;
-  if (ALERT_STATES.has(currentBusinessState)) return;
+  if (!pointer || pointer.dragStarted || !pointer.moved) return;
 
   pointer.dragStarted = true;
+  pokeClickAllowed = false;
+  pokeGestureInvalid = true;
+  clearTimeout(pokeClickTimer);
+  pokeClickTimer = null;
+
   const session = {
     targetState: currentBusinessState,
     statusVersion: statusUpdateVersion,
@@ -1137,13 +1158,33 @@ function maybeStartPokeDrag() {
   };
   pointer.dragSession = session;
   dragSession = session;
-  // Invalidate any reaction lookup already in flight. The existing reaction
-  // remains visible until the optional drag asset has been verified.
-  reactionRequestVersion++;
-  beginPokeDrag(pointer, session);
+
+  if (!ALERT_STATES.has(currentBusinessState)) {
+    // Begin resolving the optional reaction before handing mouse capture to
+    // the native window drag. Convention assets are preloaded below.
+    reactionRequestVersion++;
+    beginPokeDrag(pointer, session);
+  }
+
+  scheduleNativeDragFinish(session, NATIVE_DRAG_SAFETY_MS);
+  if (window.__TAURI__) {
+    Promise.resolve(window.__TAURI__.window.getCurrentWindow().startDragging()).catch(() => {
+      finishPokeDrag(session);
+    });
+  } else {
+    finishPokeDrag(session);
+  }
+}
+
+function noteNativeWindowMoved() {
+  const pointer = pokePointer;
+  if (!pointer || !pointer.dragStarted || !pointer.dragSession) return;
+  scheduleNativeDragFinish(pointer.dragSession);
 }
 
 function cancelPokeDrag() {
+  clearTimeout(nativeDragEndTimer);
+  nativeDragEndTimer = null;
   const session = dragSession;
   dragSession = null;
   if (session) session.active = false;
@@ -1152,6 +1193,8 @@ function cancelPokeDrag() {
 
 function finishPokeDrag(session) {
   if (!session || dragSession !== session) return;
+  clearTimeout(nativeDragEndTimer);
+  nativeDragEndTimer = null;
   dragSession = null;
   const wasActive = session.active && activeOneShot === session.oneShot;
   session.active = false;
@@ -2028,14 +2071,16 @@ menuBackdrop.addEventListener('click', closeMenu);
 menuBackdrop.addEventListener('contextmenu', (e) => { e.preventDefault(); closeMenu(); });
 window.addEventListener('blur', closeMenu);
 
-// Drag — single handler for all draggable elements
-for (const el of [imgWrapper, asciiPre, bubble, stateLabel]) {
+// Bubble and state label remain simple drag handles. The character art waits
+// for real pointer movement before native dragging so clicks and double-clicks
+// remain observable in WebView2.
+for (const el of [bubble, stateLabel]) {
   el.addEventListener('mousedown', startDrag);
 }
 
-// Poke tracking deliberately lives beside (rather than inside) the drag
-// handler. Native Tauri dragging still starts on mousedown, while the
-// movement/hold record decides whether the resulting mouseup is a click.
+// Character-art gestures distinguish a click from a drag before native Tauri
+// takes mouse capture. This is required on Windows, where startDragging() on
+// mousedown suppresses the later click/dblclick and pointer movement events.
 if (teamBadge) {
   teamBadge.addEventListener('pointerdown', (event) => event.stopPropagation());
   teamBadge.addEventListener('mousedown', (event) => event.stopPropagation());
@@ -2056,6 +2101,11 @@ window.addEventListener('pointercancel', cancelPokePointer);
 window.addEventListener('blur', cancelPokePointer);
 artStage.addEventListener('click', handlePokeClick);
 artStage.addEventListener('dblclick', handlePokeDoubleClick);
+if (window.__TAURI__?.window) {
+  window.__TAURI__.window.getCurrentWindow().onMoved(noteNativeWindowMoved).catch((error) => {
+    console.error('Failed to observe native pet dragging:', error);
+  });
+}
 artStage.addEventListener('mouseenter', startPokeHover);
 artStage.addEventListener('mouseleave', stopPokeHover);
 
@@ -2229,6 +2279,12 @@ async function preloadAssets() {
         const frames = Array.isArray(reaction) ? reaction : [reaction];
         for (const frame of frames) if (typeof frame === 'string') paths.push(frame);
       }
+    }
+    // A custom pack may rely entirely on the documented naming convention
+    // instead of declaring reactions. Preload drag candidates so the image can
+    // switch before native Windows dragging takes mouse capture.
+    if (typeof PetEvents !== 'undefined' && PetEvents.getReactionAssetCandidates) {
+      paths.push(...PetEvents.getReactionAssetCandidates(cfg, mode, 'drag'));
     }
   }
   await Promise.all([...new Set(paths.filter(Boolean))].map(p => loadAsset(p)));

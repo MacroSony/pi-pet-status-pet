@@ -335,7 +335,7 @@ test('chat source code contains zero innerHTML usage and safe isolation contract
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/i);
   assert.match(html, /<script src="chat\.js"><\/script>/);
 
-  // App.js opens pet chat on double-click
+  // App.js opens pet chat on double-click.
   assert.match(app, /open_pet_chat/);
   assert.match(app, /openPetChat\(\)/);
 
@@ -343,6 +343,22 @@ test('chat source code contains zero innerHTML usage and safe isolation contract
   for (const forbidden of ['psh_', 'rawSessionId', 'capabilityToken']) {
     assert.doesNotMatch(js, new RegExp(forbidden));
   }
+});
+
+test('character art waits for movement before handing capture to native dragging', () => {
+  const app = fs.readFileSync(path.join(__dirname, '../src/app.js'), 'utf8');
+
+  // Immediate native mousedown dragging is retained only for non-poke handles.
+  assert.match(app, /for \(const el of \[bubble, stateLabel\]\)/);
+  assert.doesNotMatch(app, /for \(const el of \[imgWrapper, asciiPre, bubble, stateLabel\]\)/);
+
+  // The art gesture crosses a movement threshold, starts the optional reaction,
+  // and only then hands capture to Tauri. Unmoved clicks can still become dblclick.
+  assert.match(app, /if \(!pointer \|\| pointer\.dragStarted \|\| !pointer\.moved\) return;/);
+  assert.match(app, /beginPokeDrag\(pointer, session\);[\s\S]{0,500}startDragging\(\)/);
+  assert.match(app, /addEventListener\('dblclick', handlePokeDoubleClick\)/);
+  assert.match(app, /onMoved\(noteNativeWindowMoved\)/);
+  assert.match(app, /scheduleNativeDragFinish\(pointer\.dragSession\)/);
 });
 
 test('coordinator envelope projection renders server pending state and messages', () => {
