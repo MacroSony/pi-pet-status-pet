@@ -9,6 +9,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html, body {
   margin: 0;
   padding: 0;
@@ -28,6 +32,7 @@ html, body {
   width: 100%;
   max-width: 600px;
   margin: 0 auto;
+  border: 1px solid rgba(218, 193, 255, 0.18);
 }
 
 .chat-header {
@@ -46,6 +51,39 @@ html, body {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.16em;
+}
+
+.header-main,
+.eyebrow,
+#chat-title {
+  cursor: default;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.btn-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #b9afc7;
+  font: 18px/1 "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+.btn-close:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: #fecaca;
+}
+
+.btn-close:focus-visible {
+  outline: 2px solid rgba(176, 116, 255, 0.6);
+  outline-offset: 1px;
 }
 
 h1 {

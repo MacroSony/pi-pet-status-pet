@@ -56,7 +56,7 @@ class FakeElement {
 
 function makeChatDocument() {
   const ids = [
-    'chat-title', 'clear-button', 'messages-container',
+    'chat-title', 'clear-button', 'close-button', 'messages-container',
     'chat-empty', 'chat-messages', 'chat-pending',
     'chat-error', 'chat-textarea', 'send-button',
   ];
@@ -228,12 +228,16 @@ test('handleClearChat invokes clear_pet_chat and empties message UI', async () =
   assert.equal(doc.elements['chat-empty'].hidden, false);
 });
 
-test('setupChatEvents binds Enter send and clear click correctly', async () => {
+test('setupChatEvents binds Enter, clear, and frameless close controls', async () => {
   const doc = makeChatDocument();
   let invokeCalls = [];
+  let closeCalls = 0;
 
   const win = {
     __TAURI__: {
+      window: {
+        getCurrentWindow: () => ({ close: () => { closeCalls += 1; } }),
+      },
       core: {
         invoke: async (cmd, args) => {
           invokeCalls.push({ cmd, args });
@@ -271,9 +275,11 @@ test('setupChatEvents binds Enter send and clear click correctly', async () => {
   });
   assert.equal(defaultPrevented, false);
 
-  // Trigger clear click
+  // Trigger clear and custom frameless close controls.
   doc.elements['clear-button'].onclick();
   assert.ok(invokeCalls.some((c) => c.cmd === 'clear_pet_chat'));
+  doc.elements['close-button'].onclick();
+  assert.equal(closeCalls, 1);
 });
 
 test('initializes chat immediately when DOM readyState is interactive or complete', async () => {
@@ -327,6 +333,7 @@ test('waits for DOMContentLoaded when DOM readyState is loading', async () => {
 
 test('chat source code contains zero innerHTML usage and safe isolation contracts', () => {
   const html = fs.readFileSync(path.join(__dirname, '../src/chat.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '../src/chat.css'), 'utf8');
   const js = fs.readFileSync(path.join(__dirname, '../src/chat.js'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '../src/app.js'), 'utf8');
 
@@ -334,6 +341,9 @@ test('chat source code contains zero innerHTML usage and safe isolation contract
   // Ensure no inline script tags in HTML (only external src="chat.js")
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/i);
   assert.match(html, /<script src="chat\.js"><\/script>/);
+  assert.match(html, /id="close-button"/);
+  assert.match(html, /data-tauri-drag-region/);
+  assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;/);
 
   // App.js opens pet chat on double-click.
   assert.match(app, /open_pet_chat/);

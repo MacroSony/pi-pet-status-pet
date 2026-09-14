@@ -101,7 +101,7 @@ html, body {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  transition: opacity 0.2s ease;
+  transition: none;
 }
 
 /* Session name: an absolute HUD, never a layout element. */

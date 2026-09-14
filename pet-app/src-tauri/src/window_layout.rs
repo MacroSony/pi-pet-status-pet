@@ -4,6 +4,56 @@ use std::path::PathBuf;
 
 use super::{is_lock_alive, is_safe_session_id, read_window_position, SavedWindowPosition};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowRect {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+pub(crate) fn calculate_companion_window_position(
+    work_area: WindowRect,
+    anchor: WindowRect,
+    companion_width: u32,
+    companion_height: u32,
+    gap: u32,
+) -> SavedWindowPosition {
+    let work_left = work_area.x as i64;
+    let work_top = work_area.y as i64;
+    let work_right = work_left.saturating_add(work_area.width as i64);
+    let work_bottom = work_top.saturating_add(work_area.height as i64);
+    let companion_width = companion_width as i64;
+    let companion_height = companion_height as i64;
+    let gap = gap as i64;
+
+    let right_x = (anchor.x as i64)
+        .saturating_add(anchor.width as i64)
+        .saturating_add(gap);
+    let left_x = (anchor.x as i64)
+        .saturating_sub(gap)
+        .saturating_sub(companion_width);
+    let max_x = work_right.saturating_sub(companion_width).max(work_left);
+    let x = if right_x.saturating_add(companion_width) <= work_right {
+        right_x
+    } else if left_x >= work_left {
+        left_x
+    } else {
+        (anchor.x as i64).clamp(work_left, max_x)
+    };
+
+    let centered_y = (anchor.y as i64)
+        .saturating_add(anchor.height as i64 / 2)
+        .saturating_sub(companion_height / 2);
+    let max_y = work_bottom.saturating_sub(companion_height).max(work_top);
+    let y = centered_y.clamp(work_top, max_y);
+
+    SavedWindowPosition {
+        x: x.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        y: y.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MonitorBounds {
     pub(crate) x: i32,
@@ -343,6 +393,30 @@ mod tests {
             is_primary,
             is_current,
         }
+    }
+
+    #[test]
+    fn test_companion_prefers_right_and_centers_vertically() {
+        let work = WindowRect { x: 0, y: 0, width: 1920, height: 1040 };
+        let pet = WindowRect { x: 1200, y: 500, width: 200, height: 240 };
+        let pos = calculate_companion_window_position(work, pet, 360, 520, 12);
+        assert_eq!(pos, SavedWindowPosition { x: 1412, y: 360 });
+    }
+
+    #[test]
+    fn test_companion_flips_left_near_right_edge() {
+        let work = WindowRect { x: 0, y: 0, width: 1920, height: 1040 };
+        let pet = WindowRect { x: 1700, y: 700, width: 200, height: 240 };
+        let pos = calculate_companion_window_position(work, pet, 360, 520, 12);
+        assert_eq!(pos, SavedWindowPosition { x: 1328, y: 520 });
+    }
+
+    #[test]
+    fn test_companion_clamps_inside_negative_origin_work_area() {
+        let work = WindowRect { x: -1280, y: -40, width: 1280, height: 1024 };
+        let pet = WindowRect { x: -1270, y: -20, width: 200, height: 240 };
+        let pos = calculate_companion_window_position(work, pet, 1400, 1200, 12);
+        assert_eq!(pos, SavedWindowPosition { x: -1280, y: -40 });
     }
 
     #[test]

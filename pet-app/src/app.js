@@ -394,6 +394,8 @@ let pokeHoverTriggered = false;
 let pokePointer = null;
 let dragSession = null;
 let nativeDragEndTimer = null;
+let cachedDragReactionMode = null;
+let cachedDragReactionPath = null;
 let pokeClickAllowed = false;
 let pokeGestureInvalid = false;
 let pokeClickTimer = null;
@@ -561,14 +563,13 @@ function showAscii() {
 function setImage(src) {
   const resolved = assetUrl(src);
   if (resolved === currentImgSrc) return;
-  // If asset not yet cached, try loading it on-demand (fixes race with preload)
+  // Keep the current frame visible while an uncached external asset loads,
+  // then switch directly. Fading to transparent made short reactions look
+  // like the idle loop blinked instead of actually changing animation.
   if (resolved === src && hasExternalAssets && window.__TAURI__) {
-    imgEl.style.opacity = '0';
     loadAsset(src).then(url => {
       if (url !== src) setImage(src); // retry with cached version
       else {
-        // External load failed (e.g. bundled ferris SVGs) — show the
-        // original path directly rather than leaving the img invisible.
         currentImgSrc = src;
         imgEl.src = src;
         imgEl.style.opacity = '1';
@@ -576,12 +577,9 @@ function setImage(src) {
     });
     return;
   }
-  imgEl.style.opacity = '0';
-  setTimeout(() => {
-    imgEl.src = resolved;
-    imgEl.style.opacity = '1';
-  }, 150);
   currentImgSrc = resolved;
+  imgEl.src = resolved;
+  imgEl.style.opacity = '1';
 }
 
 // Show ASCII 404 art when image fails to load, unless playing a one-shot (silent degradation)
@@ -1095,7 +1093,8 @@ function markPokePointerMoved(event) {
 }
 
 async function beginPokeDrag(pointer, session) {
-  const reactionPath = await findReactionAsset(
+  const cachedPath = cachedDragReactionMode === mode ? cachedDragReactionPath : null;
+  const reactionPath = cachedPath || await findReactionAsset(
     'drag',
     () => dragSession === session
       && statusUpdateVersion === session.statusVersion
@@ -2024,6 +2023,8 @@ async function downloadAndSelectDlc(dlcName) {
 
 async function selectChar(newMode) {
   mode = newMode;
+  cachedDragReactionMode = null;
+  cachedDragReactionPath = null;
   activeCharacterConfig = CHARACTER_CONFIGS[mode] || null;
   localStorage.setItem('petMode', mode);
   closeMenu();
@@ -2252,7 +2253,9 @@ function assetUrl(path) {
 
 // Preload only the active mode's assets (including transitions and variations)
 async function preloadAssets() {
+  const preloadMode = mode;
   let paths = [];
+  let dragCandidates = [];
   if (GIF_MODES[mode]) {
     for (const gifs of Object.values(GIF_MODES[mode])) for (const g of gifs) paths.push(g);
   } else if (mode === 'ferris') {
@@ -2284,10 +2287,15 @@ async function preloadAssets() {
     // instead of declaring reactions. Preload drag candidates so the image can
     // switch before native Windows dragging takes mouse capture.
     if (typeof PetEvents !== 'undefined' && PetEvents.getReactionAssetCandidates) {
-      paths.push(...PetEvents.getReactionAssetCandidates(cfg, mode, 'drag'));
+      dragCandidates = PetEvents.getReactionAssetCandidates(cfg, mode, 'drag');
+      paths.push(...dragCandidates);
     }
   }
   await Promise.all([...new Set(paths.filter(Boolean))].map(p => loadAsset(p)));
+  if (mode === preloadMode) {
+    cachedDragReactionMode = preloadMode;
+    cachedDragReactionPath = dragCandidates.find(candidate => !!assetCache[candidate]) || null;
+  }
 }
 
 // ── Init ──

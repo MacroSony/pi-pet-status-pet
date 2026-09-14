@@ -10,6 +10,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWin
 pub mod adapter;
 pub mod status_map;
 mod window_layout;
+use window_layout::{calculate_companion_window_position, WindowRect};
 #[cfg(test)]
 mod tests;
 
@@ -540,10 +541,47 @@ async fn open_pet_chat(
     app: tauri::AppHandle,
 ) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("pet-chat") {
+        let _ = window.unminimize();
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(true);
     }
+
+    const CHAT_WIDTH: f64 = 360.0;
+    const CHAT_HEIGHT: f64 = 520.0;
+    const CHAT_GAP: u32 = 12;
+
+    let chat_position = app.get_webview_window("main").and_then(|pet_window| {
+        let pet_position = pet_window.outer_position().ok()?;
+        let pet_size = pet_window.outer_size().ok()?;
+        let monitor = pet_window.current_monitor().ok().flatten()?;
+        let work_area = monitor.work_area();
+        let scale_factor = if monitor.scale_factor().is_finite() && monitor.scale_factor() > 0.0 {
+            monitor.scale_factor()
+        } else {
+            1.0
+        };
+        let chat_width = (CHAT_WIDTH * scale_factor).round().max(1.0) as u32;
+        let chat_height = (CHAT_HEIGHT * scale_factor).round().max(1.0) as u32;
+
+        Some(calculate_companion_window_position(
+            WindowRect {
+                x: work_area.position.x,
+                y: work_area.position.y,
+                width: work_area.size.width,
+                height: work_area.size.height,
+            },
+            WindowRect {
+                x: pet_position.x,
+                y: pet_position.y,
+                width: pet_size.width,
+                height: pet_size.height,
+            },
+            chat_width,
+            chat_height,
+            (CHAT_GAP as f64 * scale_factor).round().max(1.0) as u32,
+        ))
+    });
 
     let build_result = WebviewWindowBuilder::new(
         &app,
@@ -551,17 +589,28 @@ async fn open_pet_chat(
         WebviewUrl::App("chat.html".into()),
     )
         .title("Pi Pet Chat")
-        .inner_size(360.0, 520.0)
+        .inner_size(CHAT_WIDTH, CHAT_HEIGHT)
+        .min_inner_size(320.0, 400.0)
         .resizable(true)
-        .decorations(true)
+        .decorations(false)
         .transparent(false)
         .always_on_top(false)
         .skip_taskbar(false)
-        .focused(true)
+        .focused(false)
+        .visible(false)
         .build();
 
     match build_result {
-        Ok(_) => Ok(true),
+        Ok(window) => {
+            if let Some(position) = chat_position {
+                window
+                    .set_position(Position::Physical(PhysicalPosition::new(position.x, position.y)))
+                    .map_err(|error| error.to_string())?;
+            }
+            window.show().map_err(|error| error.to_string())?;
+            window.set_focus().map_err(|error| error.to_string())?;
+            Ok(true)
+        }
         Err(error) => Err(error.to_string()),
     }
 }

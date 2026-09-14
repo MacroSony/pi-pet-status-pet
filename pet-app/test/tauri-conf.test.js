@@ -51,8 +51,8 @@ describe("tauri.conf.json window configuration contract", () => {
     assert.ok(capability.permissions.includes("core:default"));
     assert.ok(capability.permissions.includes("core:event:allow-listen"));
     assert.ok(capability.permissions.includes("core:window:allow-close"));
+    assert.ok(capability.permissions.includes("core:window:allow-start-dragging"));
     assert.ok(!capability.permissions.includes("core:event:allow-emit"));
-    assert.ok(!capability.permissions.includes("core:window:allow-start-dragging"));
     assert.ok(!capability.permissions.includes("core:window:allow-set-position"));
     assert.ok(!capability.permissions.includes("core:window:allow-set-size"));
   });

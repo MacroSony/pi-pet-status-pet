@@ -198,6 +198,7 @@ async function handleClearChat(win = window, doc = document) {
 function setupChatEvents(win = window, doc = document) {
   const sendBtn = doc.getElementById('send-button');
   const clearBtn = doc.getElementById('clear-button');
+  const closeBtn = doc.getElementById('close-button');
   const textarea = doc.getElementById('chat-textarea');
 
   if (sendBtn) {
@@ -209,6 +210,15 @@ function setupChatEvents(win = window, doc = document) {
   if (clearBtn) {
     clearBtn.onclick = () => {
       handleClearChat(win, doc);
+    };
+  }
+
+  if (closeBtn) {
+    closeBtn.onclick = () => {
+      const currentWindow = win.__TAURI__?.window?.getCurrentWindow?.();
+      if (currentWindow && typeof currentWindow.close === 'function') {
+        currentWindow.close();
+      }
     };
   }
 
