@@ -358,23 +358,27 @@ test('chat source code contains zero innerHTML usage and safe isolation contract
 test('character art waits for movement before handing capture to native dragging', () => {
   const app = fs.readFileSync(path.join(__dirname, '../src/app.js'), 'utf8');
 
-  // Immediate native mousedown dragging is retained only for non-poke handles.
+  // Immediate native mousedown dragging is retained only for non-art handles.
   assert.match(app, /for \(const el of \[bubble, stateLabel\]\)/);
   assert.doesNotMatch(app, /for \(const el of \[imgWrapper, asciiPre, bubble, stateLabel\]\)/);
 
   // The art gesture crosses a movement threshold, starts the optional reaction,
   // and only then hands capture to Tauri. Unmoved clicks can still become dblclick.
   assert.match(app, /if \(!pointer \|\| pointer\.dragStarted \|\| !pointer\.moved\) return;/);
-  assert.match(app, /beginPokeDrag\(pointer, session\);[\s\S]{0,1200}requestAnimationFrame[\s\S]{0,500}startNativeDrag/);
+  assert.match(app, /beginPetDrag\(pointer, session\);[\s\S]{0,1200}requestAnimationFrame[\s\S]{0,500}startNativeDrag/);
   assert.match(app, /requestAnimationFrame\(\(\) => \{[\s\S]{0,200}requestAnimationFrame\(startNativeDrag\)/);
-  assert.match(app, /addEventListener\('dblclick', handlePokeDoubleClick\)/);
+  assert.match(app, /addEventListener\('dblclick', handlePetDoubleClick\)/);
   assert.match(app, /onMoved\(noteNativeWindowMoved\)/);
   assert.match(app, /scheduleNativeDragFinish\(pointer\.dragSession\)/);
-  assert.match(app, /pointercancel', handlePokeCaptureLoss/);
-  assert.match(app, /pokePointer\.dragStarted && pokePointer\.dragSession === dragSession/);
-  assert.doesNotMatch(app, /pointercancel', cancelPokePointer/);
+  assert.match(app, /pointercancel', handlePetCaptureLoss/);
+  assert.match(app, /gesturePointer\.dragStarted && gesturePointer\.dragSession === dragSession/);
+  assert.doesNotMatch(app, /pointercancel', cancelPetPointer/);
   assert.match(app, /invoke\('is_primary_mouse_button_down'\)/);
   assert.match(app, /isDown === false[\s\S]{0,200}releaseNativeDragSession\(session\)/);
+
+  // Agent-delivered pet_express owns emotional feedback; local hardcoded poke
+  // reactions and their appearance toggle no longer exist.
+  assert.doesNotMatch(app, /triggerPoke|handlePokeClick|startPokeHover|pokeCooldown|appearance\.poke/);
 });
 
 test('coordinator envelope projection renders server pending state and messages', () => {

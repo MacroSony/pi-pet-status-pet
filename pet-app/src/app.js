@@ -146,7 +146,7 @@ const GIF_MODES = {};
 const CHARACTER_CONFIGS = {};
 const DEFAULT_APPEARANCE = Object.freeze({
   motion: 'full', uiPreset: 'classic', artScale: 1,
-  bubble: 'all', stateLabel: 'always', identity: 'always', poke: 'on',
+  bubble: 'all', stateLabel: 'always', identity: 'always',
 });
 const APPEARANCE_VALUES = Object.freeze({
   motion: ['intrinsic', 'subtle', 'full'],
@@ -155,7 +155,6 @@ const APPEARANCE_VALUES = Object.freeze({
   bubble: ['off', 'alerts', 'all'],
   stateLabel: ['off', 'minimal', 'alerts', 'always'],
   identity: ['hidden', 'hover', 'always'],
-  poke: ['on', 'off'],
 });
 
 // Ferris SVG map loaded from character.json (populated at init, fallback to hardcoded)
@@ -382,16 +381,11 @@ const receiptPoller = (typeof PetEvents !== 'undefined' && PetEvents.createRecei
     })
   : null;
 
-const POKE_COOLDOWN_MS = 4000;
-const POKE_HOVER_MS = 3000;
-const POKE_CLICK_HOLD_MS = 300;
-const POKE_CLICK_DISTANCE = 5;
+const DRAG_HOLD_MS = 300;
+const DRAG_DISTANCE_PX = 5;
 const NATIVE_DRAG_IDLE_MS = 500;
 const NATIVE_DRAG_SAFETY_MS = 10000;
-let pokeCooldownUntil = 0;
-let pokeHoverTimer = null;
-let pokeHoverTriggered = false;
-let pokePointer = null;
+let gesturePointer = null;
 let dragSession = null;
 let nativeDragEndTimer = null;
 let nativeDragReleasePoll = null;
@@ -399,10 +393,7 @@ let nativeDragButtonStateSupported = false;
 let nativeDragPollInFlight = false;
 let cachedDragReactionMode = null;
 let cachedDragReactionPath = null;
-let pokeClickAllowed = false;
-let pokeGestureInvalid = false;
-let pokeClickTimer = null;
-let lastPokeDoubleClickAt = -Infinity;
+let petGestureInvalid = false;
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -1056,46 +1047,22 @@ function handleReactionEvent(rawReaction) {
   playExpression(event);
 }
 
-// Poke reactions use the same reaction asset lookup and REACTION one-shot slot
-// as file-backed reaction events. The cooldown is for local user interaction
-// only; external reaction events retain their existing behavior.
-function triggerPoke(emotion) {
-  const now = Date.now();
-  if (activeAppearance().poke !== 'on' || ALERT_STATES.has(currentBusinessState)) return false;
-  if (now < pokeCooldownUntil) return false;
-
-  pokeCooldownUntil = now + POKE_COOLDOWN_MS;
-  playExpression({
-    schemaVersion: '1',
-    eventId: `poke_${now}`,
-    petId: boundSessionId,
-    kind: 'expression',
-    payload: {
-      emotion,
-      durationMs: 2500,
-    },
-    createdAtMs: now,
-    expiresAtMs: now + 2500,
-  });
-  return true;
-}
-
-function isPokeTarget(target) {
+function isPetGestureTarget(target) {
   if (!target || !artStage.contains(target)) return false;
   return !target.closest('#state-gem, #speech-bubble, #char-menu, #menu-backdrop, #session-name, #team-badge');
 }
 
-function markPokePointerMoved(event) {
-  if (!pokePointer) return;
-  const dx = event.clientX - pokePointer.x;
-  const dy = event.clientY - pokePointer.y;
-  if (Math.hypot(dx, dy) > POKE_CLICK_DISTANCE) {
-    pokePointer.moved = true;
-    maybeStartPokeDrag();
+function markPetPointerMoved(event) {
+  if (!gesturePointer) return;
+  const dx = event.clientX - gesturePointer.x;
+  const dy = event.clientY - gesturePointer.y;
+  if (Math.hypot(dx, dy) > DRAG_DISTANCE_PX) {
+    gesturePointer.moved = true;
+    maybeStartPetDrag();
   }
 }
 
-async function beginPokeDrag(pointer, session) {
+async function beginPetDrag(pointer, session) {
   const cachedPath = cachedDragReactionMode === mode ? cachedDragReactionPath : null;
   const reactionPath = cachedPath || await findReactionAsset(
     'drag',
@@ -1134,12 +1101,11 @@ function clearNativeDragReleasePoll() {
 }
 
 function releaseNativeDragSession(session) {
-  finishPokeDrag(session);
-  if (pokePointer && pokePointer.dragSession === session) {
-    clearTimeout(pokePointer.holdTimer);
-    pokePointer = null;
-    pokeClickAllowed = false;
-    pokeGestureInvalid = true;
+  finishPetDrag(session);
+  if (gesturePointer && gesturePointer.dragSession === session) {
+    clearTimeout(gesturePointer.holdTimer);
+    gesturePointer = null;
+    petGestureInvalid = true;
   }
 }
 
@@ -1182,15 +1148,12 @@ function startNativeDragReleasePoll(session) {
   poll();
 }
 
-function maybeStartPokeDrag() {
-  const pointer = pokePointer;
+function maybeStartPetDrag() {
+  const pointer = gesturePointer;
   if (!pointer || pointer.dragStarted || !pointer.moved) return;
 
   pointer.dragStarted = true;
-  pokeClickAllowed = false;
-  pokeGestureInvalid = true;
-  clearTimeout(pokeClickTimer);
-  pokeClickTimer = null;
+  petGestureInvalid = true;
 
   const session = {
     targetState: currentBusinessState,
@@ -1204,19 +1167,19 @@ function maybeStartPokeDrag() {
     // Begin resolving the optional reaction before handing mouse capture to
     // the native window drag. Convention assets are preloaded below.
     reactionRequestVersion++;
-    beginPokeDrag(pointer, session);
+    beginPetDrag(pointer, session);
   }
 
   const startNativeDrag = () => {
-    if (pokePointer !== pointer || dragSession !== session) return;
+    if (gesturePointer !== pointer || dragSession !== session) return;
     scheduleNativeDragFinish(session, NATIVE_DRAG_SAFETY_MS);
     if (window.__TAURI__) {
       Promise.resolve(window.__TAURI__.window.getCurrentWindow().startDragging()).catch(() => {
-        finishPokeDrag(session);
+        finishPetDrag(session);
       });
       startNativeDragReleasePoll(session);
     } else {
-      finishPokeDrag(session);
+      finishPetDrag(session);
     }
   };
 
@@ -1233,14 +1196,14 @@ function maybeStartPokeDrag() {
 }
 
 function noteNativeWindowMoved() {
-  const pointer = pokePointer;
+  const pointer = gesturePointer;
   if (!pointer || !pointer.dragStarted || !pointer.dragSession) return;
   if (!nativeDragReleasePoll && !nativeDragButtonStateSupported) {
     scheduleNativeDragFinish(pointer.dragSession);
   }
 }
 
-function cancelPokeDrag() {
+function cancelPetDrag() {
   clearTimeout(nativeDragEndTimer);
   nativeDragEndTimer = null;
   clearNativeDragReleasePoll();
@@ -1251,7 +1214,7 @@ function cancelPokeDrag() {
   if (activeOneShot && activeOneShot.type === 'drag') cancelActiveOneShot();
 }
 
-function finishPokeDrag(session) {
+function finishPetDrag(session) {
   if (!session || dragSession !== session) return;
   clearTimeout(nativeDragEndTimer);
   nativeDragEndTimer = null;
@@ -1266,66 +1229,61 @@ function finishPokeDrag(session) {
   }
 }
 
-function beginPokePointer(event) {
+function beginPetPointer(event) {
   if (event.button !== undefined && event.button !== 0) return;
-  if (!isPokeTarget(event.target) || pokePointer) return;
+  if (!isPetGestureTarget(event.target) || gesturePointer) return;
 
-  stopPokeHover();
   const startedAt = Date.now();
-  pokePointer = {
+  gesturePointer = {
     x: event.clientX,
     y: event.clientY,
     startedAt,
     moved: false,
     holdTimer: setTimeout(() => {
-      if (pokePointer && pokePointer.startedAt === startedAt) {
-        pokePointer.held = true;
-        maybeStartPokeDrag();
+      if (gesturePointer && gesturePointer.startedAt === startedAt) {
+        gesturePointer.held = true;
+        maybeStartPetDrag();
       }
-    }, POKE_CLICK_HOLD_MS),
+    }, DRAG_HOLD_MS),
   };
-  pokeClickAllowed = false;
-  pokeGestureInvalid = false;
+  petGestureInvalid = false;
 }
 
-function endPokePointer(event) {
-  if (!pokePointer) return;
-  markPokePointerMoved(event);
-  const pointer = pokePointer;
+function endPetPointer(event) {
+  if (!gesturePointer) return;
+  markPetPointerMoved(event);
+  const pointer = gesturePointer;
   clearTimeout(pointer.holdTimer);
-  finishPokeDrag(pointer.dragSession);
-  pokePointer = null;
-  // Releasing outside the art stage is not a click, even if the pointer did
-  // not move far enough to be classified as a drag.
-  pokeClickAllowed = isPokeTarget(event.target)
-    && !pointer.moved
-    && !pointer.held
-    && Date.now() - pointer.startedAt <= POKE_CLICK_HOLD_MS;
-  pokeGestureInvalid = !pokeClickAllowed;
+  finishPetDrag(pointer.dragSession);
+  gesturePointer = null;
+  // Releasing outside the art stage or after a held/moved gesture must not
+  // be promoted to a double-click by Chromium.
+  petGestureInvalid = !isPetGestureTarget(event.target)
+    || pointer.moved
+    || pointer.held
+    || Date.now() - pointer.startedAt > DRAG_HOLD_MS;
 }
 
-function cancelPokePointer() {
-  if (pokePointer) {
-    clearTimeout(pokePointer.holdTimer);
-    finishPokeDrag(pokePointer.dragSession);
+function cancelPetPointer() {
+  if (gesturePointer) {
+    clearTimeout(gesturePointer.holdTimer);
+    finishPetDrag(gesturePointer.dragSession);
   }
-  cancelPokeDrag();
-  pokePointer = null;
-  pokeClickAllowed = false;
-  pokeGestureInvalid = true;
+  cancelPetDrag();
+  gesturePointer = null;
+  petGestureInvalid = true;
 }
 
-function handlePokeCaptureLoss() {
+function handlePetCaptureLoss() {
   // Win32 native dragging transfers pointer capture away from WebView2 and
   // immediately emits pointercancel (sometimes blur). That is not the end of
   // the drag; window-move debounce or the safety timer owns native teardown.
-  if (pokePointer && pokePointer.dragStarted && pokePointer.dragSession === dragSession) {
-    clearTimeout(pokePointer.holdTimer);
-    pokeClickAllowed = false;
-    pokeGestureInvalid = true;
+  if (gesturePointer && gesturePointer.dragStarted && gesturePointer.dragSession === dragSession) {
+    clearTimeout(gesturePointer.holdTimer);
+    petGestureInvalid = true;
     return;
   }
-  cancelPokePointer();
+  cancelPetPointer();
 }
 
 async function openPetChat() {
@@ -1338,61 +1296,14 @@ async function openPetChat() {
   }
 }
 
-function handlePokeClick(event) {
-  if (!isPokeTarget(event.target) || !pokeClickAllowed) return;
-  pokeClickAllowed = false;
-
-  if (event.detail >= 2) {
-    clearTimeout(pokeClickTimer);
-    pokeClickTimer = null;
-    lastPokeDoubleClickAt = Date.now();
-    triggerPoke('shy');
-    openPetChat();
-    return;
-  }
-
-  // Delay the single-click action long enough for a second click to identify
-  // a double click. The second click (detail >= 2) cancels this timer.
-  clearTimeout(pokeClickTimer);
-  pokeClickTimer = setTimeout(() => {
-    pokeClickTimer = null;
-    triggerPoke('happy');
-  }, 400);
-}
-
-function handlePokeDoubleClick(event) {
-  if (!isPokeTarget(event.target)) return;
+function handlePetDoubleClick(event) {
+  if (!isPetGestureTarget(event.target)) return;
   // A drag must not be promoted to a double click by a browser/event source.
-  if (pokeGestureInvalid) {
-    pokeGestureInvalid = false;
+  if (petGestureInvalid) {
+    petGestureInvalid = false;
     return;
   }
-  // Chromium normally reports detail=2 on the second click before dblclick;
-  // avoid playing shy twice while retaining support for a direct dblclick.
-  if (Date.now() - lastPokeDoubleClickAt < 1000) return;
-  clearTimeout(pokeClickTimer);
-  pokeClickTimer = null;
-  lastPokeDoubleClickAt = Date.now();
-  triggerPoke('shy');
   openPetChat();
-}
-
-function startPokeHover() {
-  clearTimeout(pokeHoverTimer);
-  pokeHoverTriggered = false;
-  pokeHoverTimer = setTimeout(() => {
-    pokeHoverTimer = null;
-    if (!pokeHoverTriggered && !pokePointer && !dragSession) {
-      pokeHoverTriggered = true;
-      triggerPoke('shocked');
-    }
-  }, POKE_HOVER_MS);
-}
-
-function stopPokeHover() {
-  clearTimeout(pokeHoverTimer);
-  pokeHoverTimer = null;
-  pokeHoverTriggered = false;
 }
 
 // ── Session Watchdog ──
@@ -1511,7 +1422,7 @@ function updateStatus(status, isRealEvent = false) {
   // user drag. Real state changes and alert/lifecycle states still win.
   if (interruptDrag) {
     reactionRequestVersion++;
-    cancelPokeDrag();
+    cancelPetDrag();
   }
   // Reactions outrank ordinary thinking/running/idle churn. Only alert and
   // lifecycle states interrupt their bounded presentation window.
@@ -1990,7 +1901,6 @@ function buildConfigPage() {
   addChoiceRow(charMenu, 'Bubble', appearance.bubble, [['off', 'Off'], ['alerts', 'Alerts'], ['all', 'All']], (v) => setAppearance('bubble', v));
   addChoiceRow(charMenu, 'State', appearance.stateLabel, [['off', 'Off'], ['minimal', 'Minimal'], ['alerts', 'Alerts'], ['always', 'Always']], (v) => setAppearance('stateLabel', v));
   addChoiceRow(charMenu, 'Identity', appearance.identity, [['hidden', 'Hidden'], ['hover', 'Hover'], ['always', 'Always']], (v) => { identityPinned = false; localStorage.removeItem('petIdentityPinned'); setAppearance('identity', v); });
-  addChoiceRow(charMenu, 'Poke', appearance.poke, [['on', 'On'], ['off', 'Off']], (v) => setAppearance('poke', v));
   if (sessionNameEl.textContent) addMenuItem(charMenu, identityPinned ? 'Unpin identity' : 'Pin identity', () => { identityPinned = !identityPinned; localStorage.setItem('petIdentityPinned', String(identityPinned)); applyConfig(); buildConfigPage(); });
   addDivider(charMenu);
   addSliderRow(charMenu, 'Scale', petScale, 1, 2, 0.1, (v) => { petScale = v; saveConfig('petScale', String(v)); }, '%');
@@ -2173,23 +2083,20 @@ if (teamBadge) {
   });
 }
 
-artStage.addEventListener('pointerdown', beginPokePointer);
-artStage.addEventListener('mousedown', beginPokePointer);
-window.addEventListener('pointermove', markPokePointerMoved);
-window.addEventListener('mousemove', markPokePointerMoved);
-window.addEventListener('pointerup', endPokePointer);
-window.addEventListener('mouseup', endPokePointer);
-window.addEventListener('pointercancel', handlePokeCaptureLoss);
-window.addEventListener('blur', handlePokeCaptureLoss);
-artStage.addEventListener('click', handlePokeClick);
-artStage.addEventListener('dblclick', handlePokeDoubleClick);
+artStage.addEventListener('pointerdown', beginPetPointer);
+artStage.addEventListener('mousedown', beginPetPointer);
+window.addEventListener('pointermove', markPetPointerMoved);
+window.addEventListener('mousemove', markPetPointerMoved);
+window.addEventListener('pointerup', endPetPointer);
+window.addEventListener('mouseup', endPetPointer);
+window.addEventListener('pointercancel', handlePetCaptureLoss);
+window.addEventListener('blur', handlePetCaptureLoss);
+artStage.addEventListener('dblclick', handlePetDoubleClick);
 if (window.__TAURI__?.window) {
   window.__TAURI__.window.getCurrentWindow().onMoved(noteNativeWindowMoved).catch((error) => {
     console.error('Failed to observe native pet dragging:', error);
   });
 }
-artStage.addEventListener('mouseenter', startPokeHover);
-artStage.addEventListener('mouseleave', stopPokeHover);
 
 // State gem hover interaction
 if (stateGem && stateGemTip) {
