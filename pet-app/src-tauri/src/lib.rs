@@ -19,6 +19,36 @@ static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const ASSETS_REPO: &str = "moeyui1/claude-status-pet";
 
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    #[link_name = "GetAsyncKeyState"]
+    fn get_async_key_state(virtual_key: i32) -> i16;
+    #[link_name = "GetSystemMetrics"]
+    fn get_system_metrics(index: i32) -> i32;
+}
+
+#[tauri::command]
+fn is_primary_mouse_button_down() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        const VK_LBUTTON: i32 = 0x01;
+        const VK_RBUTTON: i32 = 0x02;
+        const SM_SWAPBUTTON: i32 = 23;
+        let virtual_key = if unsafe { get_system_metrics(SM_SWAPBUTTON) } != 0 {
+            VK_RBUTTON
+        } else {
+            VK_LBUTTON
+        };
+        let state = unsafe { get_async_key_state(virtual_key) } as u16;
+        Some((state & 0x8000) != 0)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 fn init_debug(args: &[String]) {
     let _ = args; // reserved for future use
     if std::env::var("PET_DEBUG").map_or(false, |v| v == "1" || v == "true") {
@@ -2045,7 +2075,7 @@ pub fn run() {
         .manage(lock_path_shared)
         .manage(board_lock_state_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_team_presentation, open_team_board, open_pet_chat, get_pet_chat, clear_pet_chat, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
+        .invoke_handler(tauri::generate_handler![get_status, get_team_presentation, open_team_board, open_pet_chat, get_pet_chat, clear_pet_chat, is_primary_mouse_button_down, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 

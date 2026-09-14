@@ -5,6 +5,12 @@ mod tests {
 
     // ── status_map tests ──
 
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_primary_mouse_button_state_is_unsupported_off_windows() {
+        assert_eq!(crate::is_primary_mouse_button_down(), None);
+    }
+
     #[test]
     fn test_event_to_state() {
         assert_eq!(status_map::event_to_state("prompt"), "thinking");

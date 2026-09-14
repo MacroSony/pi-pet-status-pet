@@ -370,6 +370,11 @@ test('character art waits for movement before handing capture to native dragging
   assert.match(app, /addEventListener\('dblclick', handlePokeDoubleClick\)/);
   assert.match(app, /onMoved\(noteNativeWindowMoved\)/);
   assert.match(app, /scheduleNativeDragFinish\(pointer\.dragSession\)/);
+  assert.match(app, /pointercancel', handlePokeCaptureLoss/);
+  assert.match(app, /pokePointer\.dragStarted && pokePointer\.dragSession === dragSession/);
+  assert.doesNotMatch(app, /pointercancel', cancelPokePointer/);
+  assert.match(app, /invoke\('is_primary_mouse_button_down'\)/);
+  assert.match(app, /isDown === false[\s\S]{0,200}releaseNativeDragSession\(session\)/);
 });
 
 test('coordinator envelope projection renders server pending state and messages', () => {

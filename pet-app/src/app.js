@@ -386,14 +386,17 @@ const POKE_COOLDOWN_MS = 4000;
 const POKE_HOVER_MS = 3000;
 const POKE_CLICK_HOLD_MS = 300;
 const POKE_CLICK_DISTANCE = 5;
-const NATIVE_DRAG_IDLE_MS = 300;
-const NATIVE_DRAG_SAFETY_MS = 1500;
+const NATIVE_DRAG_IDLE_MS = 500;
+const NATIVE_DRAG_SAFETY_MS = 10000;
 let pokeCooldownUntil = 0;
 let pokeHoverTimer = null;
 let pokeHoverTriggered = false;
 let pokePointer = null;
 let dragSession = null;
 let nativeDragEndTimer = null;
+let nativeDragReleasePoll = null;
+let nativeDragButtonStateSupported = false;
+let nativeDragPollInFlight = false;
 let cachedDragReactionMode = null;
 let cachedDragReactionPath = null;
 let pokeClickAllowed = false;
@@ -1124,18 +1127,59 @@ async function beginPokeDrag(pointer, session) {
   setImage(reactionPath);
 }
 
+function clearNativeDragReleasePoll() {
+  clearInterval(nativeDragReleasePoll);
+  nativeDragReleasePoll = null;
+  nativeDragPollInFlight = false;
+}
+
+function releaseNativeDragSession(session) {
+  finishPokeDrag(session);
+  if (pokePointer && pokePointer.dragSession === session) {
+    clearTimeout(pokePointer.holdTimer);
+    pokePointer = null;
+    pokeClickAllowed = false;
+    pokeGestureInvalid = true;
+  }
+}
+
 function scheduleNativeDragFinish(session, delayMs = NATIVE_DRAG_IDLE_MS) {
   clearTimeout(nativeDragEndTimer);
   nativeDragEndTimer = setTimeout(() => {
     nativeDragEndTimer = null;
-    finishPokeDrag(session);
-    if (pokePointer && pokePointer.dragSession === session) {
-      clearTimeout(pokePointer.holdTimer);
-      pokePointer = null;
-      pokeClickAllowed = false;
-      pokeGestureInvalid = true;
-    }
+    releaseNativeDragSession(session);
   }, delayMs);
+}
+
+function startNativeDragReleasePoll(session) {
+  clearNativeDragReleasePoll();
+  nativeDragButtonStateSupported = false;
+  if (!window.__TAURI__?.core?.invoke) return;
+
+  const poll = async () => {
+    if (nativeDragPollInFlight || dragSession !== session) return;
+    nativeDragPollInFlight = true;
+    try {
+      const isDown = await window.__TAURI__.core.invoke('is_primary_mouse_button_down');
+      if (dragSession !== session) return;
+      if (isDown === true) {
+        nativeDragButtonStateSupported = true;
+        scheduleNativeDragFinish(session, NATIVE_DRAG_SAFETY_MS);
+      } else if (isDown === false) {
+        nativeDragButtonStateSupported = true;
+        releaseNativeDragSession(session);
+      } else {
+        clearNativeDragReleasePoll();
+      }
+    } catch (_) {
+      clearNativeDragReleasePoll();
+    } finally {
+      nativeDragPollInFlight = false;
+    }
+  };
+
+  nativeDragReleasePoll = setInterval(poll, 50);
+  poll();
 }
 
 function maybeStartPokeDrag() {
@@ -1170,6 +1214,7 @@ function maybeStartPokeDrag() {
       Promise.resolve(window.__TAURI__.window.getCurrentWindow().startDragging()).catch(() => {
         finishPokeDrag(session);
       });
+      startNativeDragReleasePoll(session);
     } else {
       finishPokeDrag(session);
     }
@@ -1190,12 +1235,16 @@ function maybeStartPokeDrag() {
 function noteNativeWindowMoved() {
   const pointer = pokePointer;
   if (!pointer || !pointer.dragStarted || !pointer.dragSession) return;
-  scheduleNativeDragFinish(pointer.dragSession);
+  if (!nativeDragReleasePoll && !nativeDragButtonStateSupported) {
+    scheduleNativeDragFinish(pointer.dragSession);
+  }
 }
 
 function cancelPokeDrag() {
   clearTimeout(nativeDragEndTimer);
   nativeDragEndTimer = null;
+  clearNativeDragReleasePoll();
+  nativeDragButtonStateSupported = false;
   const session = dragSession;
   dragSession = null;
   if (session) session.active = false;
@@ -1206,6 +1255,8 @@ function finishPokeDrag(session) {
   if (!session || dragSession !== session) return;
   clearTimeout(nativeDragEndTimer);
   nativeDragEndTimer = null;
+  clearNativeDragReleasePoll();
+  nativeDragButtonStateSupported = false;
   dragSession = null;
   const wasActive = session.active && activeOneShot === session.oneShot;
   session.active = false;
@@ -1262,6 +1313,19 @@ function cancelPokePointer() {
   pokePointer = null;
   pokeClickAllowed = false;
   pokeGestureInvalid = true;
+}
+
+function handlePokeCaptureLoss() {
+  // Win32 native dragging transfers pointer capture away from WebView2 and
+  // immediately emits pointercancel (sometimes blur). That is not the end of
+  // the drag; window-move debounce or the safety timer owns native teardown.
+  if (pokePointer && pokePointer.dragStarted && pokePointer.dragSession === dragSession) {
+    clearTimeout(pokePointer.holdTimer);
+    pokeClickAllowed = false;
+    pokeGestureInvalid = true;
+    return;
+  }
+  cancelPokePointer();
 }
 
 async function openPetChat() {
@@ -2115,8 +2179,8 @@ window.addEventListener('pointermove', markPokePointerMoved);
 window.addEventListener('mousemove', markPokePointerMoved);
 window.addEventListener('pointerup', endPokePointer);
 window.addEventListener('mouseup', endPokePointer);
-window.addEventListener('pointercancel', cancelPokePointer);
-window.addEventListener('blur', cancelPokePointer);
+window.addEventListener('pointercancel', handlePokeCaptureLoss);
+window.addEventListener('blur', handlePokeCaptureLoss);
 artStage.addEventListener('click', handlePokeClick);
 artStage.addEventListener('dblclick', handlePokeDoubleClick);
 if (window.__TAURI__?.window) {
