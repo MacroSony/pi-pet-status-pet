@@ -11,6 +11,7 @@ const {
   REACTION_INTERRUPT_STATES,
   isReactionInterruptState,
   shouldPreserveReactionPresentation,
+  shouldInterruptDragPresentation,
   isSafeRequestId,
   generateRequestId,
   validateUserMessageText,
@@ -28,6 +29,21 @@ describe("reaction presentation priority", () => {
     for (const state of ["idle", "thinking", "running", "editing", "searching", "delegating", "reading", "unknown"]) {
       assert.strictEqual(isReactionInterruptState(state), false);
       assert.strictEqual(shouldPreserveReactionPresentation(true, state), true);
+    }
+  });
+
+  it("keeps drag presentation across duplicate state refreshes", () => {
+    for (const state of ["idle", "thinking", "running", "editing", "searching", "delegating", "reading", "unknown"]) {
+      assert.strictEqual(shouldInterruptDragPresentation(true, state, state), false);
+    }
+    assert.strictEqual(shouldInterruptDragPresentation(false, "idle", "running"), false);
+  });
+
+  it("interrupts drag on real state changes and alert/lifecycle states", () => {
+    assert.strictEqual(shouldInterruptDragPresentation(true, "idle", "running"), true);
+    assert.strictEqual(shouldInterruptDragPresentation(true, "running", "idle"), true);
+    for (const state of REACTION_INTERRUPT_STATES) {
+      assert.strictEqual(shouldInterruptDragPresentation(true, state, state), true);
     }
   });
 

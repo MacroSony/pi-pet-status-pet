@@ -23,6 +23,11 @@
     return active === true && !isReactionInterruptState(nextState);
   }
 
+  function shouldInterruptDragPresentation(active, currentState, nextState) {
+    if (active !== true) return false;
+    return nextState !== currentState || isReactionInterruptState(nextState);
+  }
+
   function isSafeId(id) {
     return typeof id === 'string' && id.length > 0 && id.length <= 128 && !id.includes('/') && !id.includes('\\') && !id.includes('..');
   }
@@ -457,6 +462,7 @@
     REACTION_INTERRUPT_STATES,
     isReactionInterruptState,
     shouldPreserveReactionPresentation,
+    shouldInterruptDragPresentation,
     isSafeId,
     isSafeRequestId,
     generateRequestId,

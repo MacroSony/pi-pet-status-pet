@@ -1097,7 +1097,6 @@ async function beginPokeDrag(pointer, session) {
   const reactionPath = cachedPath || await findReactionAsset(
     'drag',
     () => dragSession === session
-      && statusUpdateVersion === session.statusVersion
       && !ALERT_STATES.has(currentBusinessState),
   );
 
@@ -1151,7 +1150,6 @@ function maybeStartPokeDrag() {
 
   const session = {
     targetState: currentBusinessState,
-    statusVersion: statusUpdateVersion,
     active: false,
     oneShot: null,
   };
@@ -1419,14 +1417,20 @@ function updateStatus(status, isRealEvent = false) {
   const state = status.state || 'idle';
   const detail = status.detail || '';
   const sessionName = status.session_name || '';
+  const previousBusinessState = currentBusinessState;
+  const stateChanged = (state !== previousBusinessState);
   const reactionWasActive = activeOneShot && activeOneShot.type === 'reaction';
   const dragWasActive = !!dragSession || (activeOneShot && activeOneShot.type === 'drag');
   const interruptReaction = (typeof PetEvents !== 'undefined' && PetEvents.isReactionInterruptState)
     ? PetEvents.isReactionInterruptState(state)
     : (ALERT_STATES.has(state) || state === 'offline' || state === 'closed');
+  const interruptDrag = (typeof PetEvents !== 'undefined' && PetEvents.shouldInterruptDragPresentation)
+    ? PetEvents.shouldInterruptDragPresentation(dragWasActive, previousBusinessState, state)
+    : (dragWasActive && (stateChanged || interruptReaction));
 
-  // Drag is direct user interaction and still yields to any business update.
-  if (dragWasActive) {
+  // Duplicate heartbeats for the same business state must not erase a direct
+  // user drag. Real state changes and alert/lifecycle states still win.
+  if (interruptDrag) {
     reactionRequestVersion++;
     cancelPokeDrag();
   }
@@ -1456,8 +1460,6 @@ function updateStatus(status, isRealEvent = false) {
     boundSessionId = status.session_id;
   }
 
-  const previousBusinessState = currentBusinessState;
-  const stateChanged = (state !== previousBusinessState);
   currentBusinessState = state;
   currentState = state;
 
@@ -1536,7 +1538,7 @@ function updateStatus(status, isRealEvent = false) {
 
   // Restore the same business loop when an interrupt cancelled a reaction or
   // drag; otherwise the normal state-change handling below applies.
-  if ((reactionWasActive || dragWasActive) && !stateChanged && visualState === state) {
+  if ((reactionWasActive || interruptDrag) && !stateChanged && visualState === state) {
     startStateLoop(state);
     return;
   }
