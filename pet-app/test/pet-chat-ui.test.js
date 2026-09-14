@@ -365,7 +365,8 @@ test('character art waits for movement before handing capture to native dragging
   // The art gesture crosses a movement threshold, starts the optional reaction,
   // and only then hands capture to Tauri. Unmoved clicks can still become dblclick.
   assert.match(app, /if \(!pointer \|\| pointer\.dragStarted \|\| !pointer\.moved\) return;/);
-  assert.match(app, /beginPokeDrag\(pointer, session\);[\s\S]{0,500}startDragging\(\)/);
+  assert.match(app, /beginPokeDrag\(pointer, session\);[\s\S]{0,1200}requestAnimationFrame[\s\S]{0,500}startNativeDrag/);
+  assert.match(app, /requestAnimationFrame\(\(\) => \{[\s\S]{0,200}requestAnimationFrame\(startNativeDrag\)/);
   assert.match(app, /addEventListener\('dblclick', handlePokeDoubleClick\)/);
   assert.match(app, /onMoved\(noteNativeWindowMoved\)/);
   assert.match(app, /scheduleNativeDragFinish\(pointer\.dragSession\)/);

@@ -1163,13 +1163,27 @@ function maybeStartPokeDrag() {
     beginPokeDrag(pointer, session);
   }
 
-  scheduleNativeDragFinish(session, NATIVE_DRAG_SAFETY_MS);
-  if (window.__TAURI__) {
-    Promise.resolve(window.__TAURI__.window.getCurrentWindow().startDragging()).catch(() => {
+  const startNativeDrag = () => {
+    if (pokePointer !== pointer || dragSession !== session) return;
+    scheduleNativeDragFinish(session, NATIVE_DRAG_SAFETY_MS);
+    if (window.__TAURI__) {
+      Promise.resolve(window.__TAURI__.window.getCurrentWindow().startDragging()).catch(() => {
+        finishPokeDrag(session);
+      });
+    } else {
       finishPokeDrag(session);
+    }
+  };
+
+  // Setting img.src and starting the Win32 move loop in the same JS task can
+  // freeze WebView2 on the old frame. Give the compositor two frames to commit
+  // the decoded drag image while the primary button is still held.
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(startNativeDrag);
     });
   } else {
-    finishPokeDrag(session);
+    setTimeout(startNativeDrag, 0);
   }
 }
 
@@ -1205,6 +1219,7 @@ function beginPokePointer(event) {
   if (event.button !== undefined && event.button !== 0) return;
   if (!isPokeTarget(event.target) || pokePointer) return;
 
+  stopPokeHover();
   const startedAt = Date.now();
   pokePointer = {
     x: event.clientX,
@@ -1303,7 +1318,7 @@ function startPokeHover() {
   pokeHoverTriggered = false;
   pokeHoverTimer = setTimeout(() => {
     pokeHoverTimer = null;
-    if (!pokeHoverTriggered) {
+    if (!pokeHoverTriggered && !pokePointer && !dragSession) {
       pokeHoverTriggered = true;
       triggerPoke('shocked');
     }
@@ -2294,9 +2309,17 @@ async function preloadAssets() {
     }
   }
   await Promise.all([...new Set(paths.filter(Boolean))].map(p => loadAsset(p)));
+  let verifiedDragPath = null;
+  for (const candidate of dragCandidates) {
+    if (!assetCache[candidate]) continue;
+    if (await verifyImageAsset(candidate)) {
+      verifiedDragPath = candidate;
+      break;
+    }
+  }
   if (mode === preloadMode) {
     cachedDragReactionMode = preloadMode;
-    cachedDragReactionPath = dragCandidates.find(candidate => !!assetCache[candidate]) || null;
+    cachedDragReactionPath = verifiedDragPath;
   }
 }
 
