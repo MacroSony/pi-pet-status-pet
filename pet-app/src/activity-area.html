@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi Pet Activity Area</title>
+  <link rel="stylesheet" href="activity-area.css">
+</head>
+<body>
+  <main id="frame">
+    <header id="move-handle">Pi Pet · Desktop activity area <span>Drag to move</span></header>
+    <p id="message" role="status">Loading…</p>
+    <p class="hint">Resize the frame using its edges. Keep it inside one screen's work area.<br>This sets a shared area; pets do not move yet.</p>
+    <footer>
+      <button id="disable" type="button">Disable area</button>
+      <button id="cancel" type="button">Cancel</button>
+      <button id="apply" type="button">Apply</button>
+    </footer>
+  </main>
+  <div class="edge north" data-resize="North"></div><div class="edge south" data-resize="South"></div>
+  <div class="edge east" data-resize="East"></div><div class="edge west" data-resize="West"></div>
+  <div class="corner ne" data-resize="NorthEast"></div><div class="corner nw" data-resize="NorthWest"></div>
+  <div class="corner se" data-resize="SouthEast"></div><div class="corner sw" data-resize="SouthWest"></div>
+  <script src="activity-area.js"></script>
+</body>
+</html>

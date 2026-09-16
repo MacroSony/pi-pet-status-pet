@@ -79,8 +79,9 @@ pub(crate) fn build_monitors(
     current: Option<&tauri::Monitor>,
 ) -> Vec<MonitorBounds> {
     let monitor_geo = |m: &tauri::Monitor| -> (i32, i32, u32, u32) {
-        let pos = m.position();
-        let size = m.size();
+        let work_area = m.work_area();
+        let pos = work_area.position;
+        let size = work_area.size;
         (pos.x, pos.y, size.width, size.height)
     };
 

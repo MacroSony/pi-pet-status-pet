@@ -10,6 +10,10 @@ use tauri::{Emitter, Manager, PhysicalPosition, Position, WebviewUrl, WebviewWin
 pub mod adapter;
 pub mod status_map;
 mod window_layout;
+mod activity_area;
+mod gathering;
+use gathering::{request_gathering, set_gathering_interaction};
+use activity_area::{open_activity_area, activity_area_editor_info, save_activity_area};
 use window_layout::{calculate_companion_window_position, WindowRect};
 #[cfg(test)]
 mod tests;
@@ -2075,12 +2079,28 @@ pub fn run() {
         .manage(lock_path_shared)
         .manage(board_lock_state_shared)
         .manage(assets_dir)
-        .invoke_handler(tauri::generate_handler![get_status, get_team_presentation, open_team_board, open_pet_chat, get_pet_chat, clear_pet_chat, is_primary_mouse_button_down, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
+        .manage(activity_area::EditorState::default())
+        .manage(gathering::GatheringState::default())
+        .invoke_handler(tauri::generate_handler![request_gathering, set_gathering_interaction, open_activity_area, activity_area_editor_info, save_activity_area, get_status, get_team_presentation, open_team_board, open_pet_chat, get_pet_chat, clear_pet_chat, is_primary_mouse_button_down, get_session_id, get_assets_dir, get_event, load_asset, load_text_asset, load_custom_asset, is_dlc_installed, download_dlc, list_available_dlcs, list_character_packs, list_unlocked_sessions, bind_session, update_assets, send_session_message, get_session_message_receipt])
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
 
             if let Some(path) = restore_position_path.as_ref() {
-                if let Some(saved) = read_window_position(path) {
+                // GTK's pre-map outer_size can still be its provisional frame
+                // (not the configured pet size). Validate the frameless startup
+                // size here; live gathering always checks real outer geometry.
+                let scale = window.scale_factor().unwrap_or(1.0);
+                let initial_size = app.config().app.windows.iter().find(|w| w.label == "main").map(|w| {
+                    tauri::PhysicalSize::new((w.width * scale).ceil() as u32, (w.height * scale).ceil() as u32)
+                }).or_else(|| window.outer_size().ok());
+                let saved = read_window_position(path).filter(|saved| {
+                    let Some(size) = initial_size else { return false; };
+                    let rect = activity_area::Rect { x: saved.x, y: saved.y, width: size.width, height: size.height };
+                    window.available_monitors().unwrap_or_default().iter().any(|monitor| {
+                        activity_area::MonitorSnapshot::from_monitor(monitor).work_area.contains(&rect)
+                    })
+                });
+                if let Some(saved) = saved {
                     let _ = window.set_position(Position::Physical(PhysicalPosition::new(saved.x, saved.y)));
                 } else if !initial_session_id.is_empty() {
                     let available = window.available_monitors().unwrap_or_default();
@@ -2088,9 +2108,9 @@ pub fn run() {
                     let current = window.current_monitor().ok().flatten();
                     let monitors = window_layout::build_monitors(&available, primary.as_ref(), current.as_ref());
                     let peer_positions = window_layout::collect_active_peer_positions(&initial_session_id, &lock_dirs, &positions_dir);
-                    if let (Some(monitor), Ok(win_size)) = (
+                    if let (Some(monitor), Some(win_size)) = (
                         window_layout::choose_target_monitor(&monitors, &peer_positions),
-                        window.outer_size(),
+                        initial_size,
                     ) {
                         if win_size.width > 0 && win_size.height > 0 {
                             let chosen = window_layout::calculate_auto_stagger_position(monitor, win_size.width, win_size.height, &peer_positions);
@@ -2267,16 +2287,21 @@ pub fn run() {
                 });
             }
 
+            gathering::start(app.handle().clone(),
+                app.state::<Arc<Mutex<String>>>().inner().clone(),
+                app.state::<Arc<Mutex<PathBuf>>>().inner().clone());
             Ok(())
         })
         .on_window_event(move |window, event| {
             match event {
                 tauri::WindowEvent::Moved(position) => {
-                    let sid = position_session_id.lock().unwrap().clone();
-                    let positions_dir = default_pet_dir().join("positions");
-                    let _ = handle_window_moved_logic(window.label(), &sid, &positions_dir, *position);
+                    if window.label() == "main" {
+                        let sid = position_session_id.lock().unwrap().clone();
+                        gathering::note_moved(window.app_handle(), sid, *position);
+                    }
                 }
                 tauri::WindowEvent::Destroyed => {
+                    if window.label() == "main" { gathering::flush_position(window.app_handle()); }
                     handle_window_destroyed_logic(
                         window.label(),
                         &lock_for_cleanup,

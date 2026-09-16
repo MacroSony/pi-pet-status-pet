@@ -173,7 +173,8 @@ test('Rust command, window-label isolation, and devUrl contracts', () => {
   assert.match(libRs, /async\s+fn\s+open_team_board/);
 
   // on_window_event checks window.label() == "main"
-  assert.match(libRs, /handle_window_moved_logic\(window\.label\(\)/);
+  assert.match(libRs, /if window\.label\(\) == "main"/);
+  assert.match(libRs, /gathering::note_moved\(window\.app_handle\(\)/);
   assert.match(libRs, /handle_window_destroyed_logic\(\s*window\.label\(\)/);
 
   // window isolation checks

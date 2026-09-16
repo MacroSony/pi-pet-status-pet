@@ -399,9 +399,17 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+function syncGatheringInteraction(blocked = Boolean(dragSession || !charMenu.classList.contains('hidden'))) {
+  if (!window.__TAURI__?.core?.invoke) return Promise.resolve();
+  return window.__TAURI__.core.invoke('set_gathering_interaction', { blocked });
+}
+
 function startDrag(event) {
   if (event && event.button !== undefined && event.button !== 0) return;
-  if (window.__TAURI__) window.__TAURI__.window.getCurrentWindow().startDragging();
+  if (gesturePointer || dragSession) return;
+  // Bubble/label drags use the same local cancellation and release tracking as art.
+  gesturePointer = { x: event.clientX, y: event.clientY, startedAt: Date.now(), moved: true, holdTimer: null };
+  maybeStartPetDrag();
 }
 
 function registerCharacterConfig(id, config) {
@@ -1170,8 +1178,10 @@ function maybeStartPetDrag() {
     beginPetDrag(pointer, session);
   }
 
-  const startNativeDrag = () => {
+  const startNativeDrag = async () => {
     if (gesturePointer !== pointer || dragSession !== session) return;
+    try { await syncGatheringInteraction(true); } catch (_) { finishPetDrag(session); return; }
+    if (gesturePointer !== pointer || dragSession !== session) { syncGatheringInteraction().catch(() => {}); return; }
     scheduleNativeDragFinish(session, NATIVE_DRAG_SAFETY_MS);
     if (window.__TAURI__) {
       Promise.resolve(window.__TAURI__.window.getCurrentWindow().startDragging()).catch(() => {
@@ -1210,6 +1220,7 @@ function cancelPetDrag() {
   nativeDragButtonStateSupported = false;
   const session = dragSession;
   dragSession = null;
+  syncGatheringInteraction().catch(() => {});
   if (session) session.active = false;
   if (activeOneShot && activeOneShot.type === 'drag') cancelActiveOneShot();
 }
@@ -1221,6 +1232,7 @@ function finishPetDrag(session) {
   clearNativeDragReleasePoll();
   nativeDragButtonStateSupported = false;
   dragSession = null;
+  syncGatheringInteraction().catch(() => {});
   const wasActive = session.active && activeOneShot === session.oneShot;
   session.active = false;
   if (wasActive) {
@@ -1671,6 +1683,20 @@ function buildMenu() {
     addDivider(charMenu);
   }
 
+  if (teamBadge && !teamBadge.hidden) {
+    for (const [label, end] of [['Gather Team in activity area', false], ['End gathering (stay here)', true]]) {
+      addMenuItem(charMenu, label, async () => {
+        closeMenu();
+        try {
+          await syncGatheringInteraction(false);
+          const message = await window.__TAURI__.core.invoke('request_gathering', { end });
+          showTransientBubble(message);
+        } catch (error) { showTransientBubble(String(error)); }
+      });
+    }
+    addDivider(charMenu);
+  }
+
   // Bundled: Ferris
   addMenuItem(charMenu, 'Ferris (SVG)', () => selectChar('ferris'), mode === 'ferris' ? 'active' : '');
   addDivider(charMenu);
@@ -1895,6 +1921,15 @@ function buildConfigPage() {
   const appearance = activeAppearance();
   addMenuItem(charMenu, '← Back', () => { menuPage = 'main'; buildMenu(); });
   addDivider(charMenu);
+  addMenuItem(charMenu, 'Desktop activity area…', async () => {
+    closeMenu();
+    try {
+      await window.__TAURI__.core.invoke('open_activity_area');
+    } catch (error) {
+      showTransientBubble(String(error));
+    }
+  });
+  addDivider(charMenu);
   addChoiceRow(charMenu, 'Motion', appearance.motion, [['intrinsic', 'Intrinsic'], ['subtle', 'Subtle'], ['full', 'Full']], (v) => setAppearance('motion', v));
   addChoiceRow(charMenu, 'UI', appearance.uiPreset, [['minimal', 'Minimal'], ['classic', 'Classic'], ['debug', 'Debug']], (v) => setAppearance('uiPreset', v));
   addSliderRow(charMenu, 'Art size', appearance.artScale, 0.7, 1.5, 0.05, (v) => setAppearance('artScale', v), '%');
@@ -2044,11 +2079,13 @@ function openMenu() {
   buildMenu();
   charMenu.classList.remove('hidden');
   menuBackdrop.classList.remove('hidden');
+  syncGatheringInteraction().catch(() => {});
 }
 
 function closeMenu() {
   charMenu.classList.add('hidden');
   menuBackdrop.classList.add('hidden');
+  syncGatheringInteraction().catch(() => {});
 }
 
 // Right-click to toggle menu

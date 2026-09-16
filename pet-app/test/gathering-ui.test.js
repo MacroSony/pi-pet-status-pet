@@ -35,3 +35,16 @@ describe("desktop gathering contract", () => {
     assert.match(layout, /fn collect_active_peer_positions/);
   });
 });
+
+test('gathering uses native-only commands and local drag cancellation, not Agent coordinates', () => {
+  const app = read('src/app.js');
+  const native = read('src-tauri/src/gathering.rs');
+  assert.match(app, /invoke\('request_gathering', \{ end \}\)/);
+  assert.match(app, /await syncGatheringInteraction\(true\)/);
+  assert.match(native, /fn set_gathering_interaction/);
+  assert.match(native, /request_epoch/);
+  assert.match(native, /run_on_main_thread/);
+  assert.match(native, /pending_position/);
+  assert.doesNotMatch(native, /set_focus\(|\.show\(|sendUserMessage|sendMessage/);
+  assert.match(native, /last|replied/);
+});

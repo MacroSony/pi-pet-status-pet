@@ -1,0 +1,21 @@
+:root { color-scheme: dark; font: 13px system-ui, sans-serif; color: #eff9ff; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+#frame { height: 100%; border: 3px dashed #70d5ff; background: rgba(15, 35, 50, .45); display: flex; flex-direction: column; padding: 10px; }
+header { cursor: move; background: #16394d; padding: 8px; border-radius: 4px; user-select: none; }
+header span { opacity: .7; margin-left: 8px; }
+p { margin: 6px 0; background: rgba(15, 35, 50, .8); padding: 4px; overflow: auto; }
+.hint { font-size: 11px; opacity: .9; }
+#message { min-height: 22px; }
+footer { margin-top: auto; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+button { background: #173c52; border: 1px solid #73b7db; border-radius: 4px; color: inherit; padding: 6px 10px; cursor: pointer; }
+#apply { background: #126080; }
+button:disabled { opacity: .5; cursor: wait; }
+.edge, .corner { position: fixed; z-index: 2; }
+.north, .south { left: 12px; right: 12px; height: 6px; cursor: ns-resize; }
+.north { top: 0; } .south { bottom: 0; }
+.east, .west { top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
+.east { right: 0; } .west { left: 0; }
+.corner { width: 12px; height: 12px; }
+.ne { right: 0; top: 0; cursor: nesw-resize; } .nw { left: 0; top: 0; cursor: nwse-resize; }
+.se { right: 0; bottom: 0; cursor: nwse-resize; } .sw { left: 0; bottom: 0; cursor: nesw-resize; }
