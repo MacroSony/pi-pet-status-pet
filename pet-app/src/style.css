@@ -24,7 +24,9 @@ html, body {
   background: rgba(255, 255, 255, 0.95);
   border: 2px solid var(--bubble-color, #e06c3c);
   border-radius: 12px;
-  padding: 6px 10px;
+  padding: 5px 10px;
+  /* A fixed native window must not flex-shrink the border around taller text. */
+  flex: 0 0 auto;
   max-width: 180px;
   text-align: center;
   position: relative;
@@ -66,7 +68,8 @@ html, body {
   word-break: break-word;
   overflow-wrap: break-word;
   display: -webkit-box;
-  -webkit-line-clamp: 4;
+  /* Two complete lines fit the default pet/chrome budget; full text is in title. */
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   text-overflow: ellipsis;

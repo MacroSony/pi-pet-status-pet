@@ -309,6 +309,7 @@ let petSessionBg = localStorage.getItem('petSessionBg') || '';
 let petFontSize = parseInt(localStorage.getItem('petFontSize') || '16');
 let petScale = parseFloat(localStorage.getItem('petScale') || '1');
 let currentBusinessState = 'idle';
+let currentBusinessDetail = '';
 // Empty string (not 'idle') so the first updateStatus always renders —
 // otherwise the initial idle update is seen as "no change" and the
 // default <img> from index.html (ferris/1.svg) is never replaced.
@@ -531,7 +532,7 @@ function applyConfig() {
   if (stateGem) {
     stateGem.hidden = !shouldShowStateGem();
   }
-  const currentDetail = (latestStatus && latestStatus.detail) || (statusText ? statusText.textContent : '');
+  const currentDetail = currentBusinessDetail || (statusText ? statusText.textContent : '');
   updateStateGemTipText(currentBusinessState, currentDetail);
 
   // Resize window to match
@@ -605,7 +606,7 @@ imgEl.addEventListener('error', () => {
       '   │  __  │ ',
       '   ╰──────╯ ',
     ].join('\n');
-    statusText.textContent = 'Image not found: ' + name;
+    setBubbleText('Image not found: ' + name);
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 8000);
@@ -939,7 +940,7 @@ async function playExpression(event) {
     const expressionBubble = { requestVersion };
     activeExpressionBubble = expressionBubble;
 
-    statusText.textContent = text;
+    setBubbleText(text);
     container.dataset.bubbleVisible = 'true';
     bubble.classList.remove('hidden');
 
@@ -957,9 +958,9 @@ async function playExpression(event) {
       activeExpressionBubble = null;
       // Restore business bubble display according to the latest status & policy.
       const state = currentBusinessState;
-      const detail = latestStatus ? latestStatus.detail : '';
+      const detail = currentBusinessDetail;
       if (shouldShowBubble(state) && (detail || state === 'offline')) {
-        statusText.textContent = detail || (state === 'offline' ? 'Zzz...' : '');
+        setBubbleText(detail || (state === 'offline' ? 'Zzz...' : ''));
         bubble.classList.remove('hidden');
         container.dataset.bubbleVisible = 'true';
       } else {
@@ -1358,7 +1359,7 @@ function checkWatchdog() {
       } else {
         // 浏览器 demo 模式停留在 offline 即可，不得报错
         if (currentBusinessState !== 'offline') {
-          updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+          updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false, true);
         }
       }
       return;
@@ -1370,7 +1371,7 @@ function checkWatchdog() {
     const sleepAfterMs = wd.sleep_after_seconds * 1000;
     if (elapsedMs >= sleepAfterMs) {
       if (currentBusinessState !== 'offline') {
-        updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false);
+        updateStatus({ state: 'offline', detail: 'Zzz... (session silent)' }, false, true);
       }
       return;
     }
@@ -1380,6 +1381,13 @@ function checkWatchdog() {
 watchdogTimer = setInterval(checkWatchdog, WATCHDOG_INTERVAL_MS);
 
 // ── Main update ──
+
+// Bubbles are bounded previews. Keep the full plain text available on hover,
+// including transient/native errors and expressions, without growing the window.
+function setBubbleText(text) {
+  statusText.textContent = text;
+  statusText.title = statusText.textContent;
+}
 
 function updateTeamBadge(team) {
   if (!teamBadge) return false;
@@ -1411,7 +1419,7 @@ async function openTeamBoard() {
   }
 }
 
-function updateStatus(status, isRealEvent = false) {
+function updateStatus(status, isRealEvent = false, presentationOnly = false) {
   if (isRealEvent) {
     lastStatusEventAt = Date.now();
   }
@@ -1445,8 +1453,12 @@ function updateStatus(status, isRealEvent = false) {
     clearTimeout(bubbleTimeout);
     bubbleTimeout = null;
   }
-  latestStatus = status;
-  updateTeamBadge(status.team || null);
+  // Watchdog sleep is a local visual overlay, not an authoritative status.
+  // Preserve the last server-provided membership so Team actions remain available.
+  if (!presentationOnly) {
+    latestStatus = status;
+    updateTeamBadge(status.team || null);
+  }
 
   if (state === 'closed' && window.__TAURI__) {
     window.__TAURI__.window.getCurrentWindow().close();
@@ -1463,6 +1475,7 @@ function updateStatus(status, isRealEvent = false) {
   }
 
   currentBusinessState = state;
+  currentBusinessDetail = detail;
   currentState = state;
 
   if (!initialized) return;
@@ -1498,7 +1511,7 @@ function updateStatus(status, isRealEvent = false) {
         bubble.style.transform = 'scale(1)';
       }, 50);
     }
-    statusText.textContent = detail;
+    setBubbleText(detail);
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     if (state === 'idle') {
@@ -1506,7 +1519,7 @@ function updateStatus(status, isRealEvent = false) {
     }
   } else if (state === 'offline' && shouldShowBubble(state)) {
     container.dataset.bubbleVisible = 'true';
-    statusText.textContent = detail || 'Zzz...';
+    setBubbleText(detail || 'Zzz...');
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     bubbleTimeout = setTimeout(() => { bubble.classList.add('hidden'); }, 30000);
@@ -1652,15 +1665,15 @@ function addChoiceRow(parent, label, value, choices, onchange) {
 function showTransientBubble(msg, durationMs = 4000) {
   clearTimeout(bubbleTimeout);
   activeExpressionBubble = null;
-  statusText.textContent = msg;
+  setBubbleText(msg);
   container.dataset.bubbleVisible = 'true';
   bubble.classList.remove('hidden');
   bubbleTimeout = setTimeout(() => {
     bubbleTimeout = null;
     const state = currentBusinessState;
-    const detail = latestStatus ? latestStatus.detail : '';
+    const detail = currentBusinessDetail;
     if (shouldShowBubble(state) && (detail || state === 'offline')) {
-      statusText.textContent = detail || 'Zzz...';
+      setBubbleText(detail || 'Zzz...');
       bubble.classList.remove('hidden');
       container.dataset.bubbleVisible = 'true';
     } else {
@@ -1949,7 +1962,7 @@ function buildConfigPage() {
     stateLabel.textContent = 'downloading';
     updateStateGemTipText('downloading', 'Updating assets...');
     setVisualAnimation('thinking');
-    statusText.textContent = 'Updating assets...';
+    setBubbleText('Updating assets...');
     bubble.classList.remove('hidden');
     try {
       await window.__TAURI__.core.invoke('update_assets');
@@ -1960,14 +1973,14 @@ function buildConfigPage() {
           dlcInstalledCache[dlc.id] = dlc.installed;
         }
       } catch(e) {}
-      statusText.textContent = 'Assets updated!';
+      setBubbleText('Assets updated!');
       setVisualAnimation('idle');
       stateLabel.textContent = 'idle';
       updateStateGemTipText('idle', 'Assets updated!');
       clearTimeout(bubbleTimeout);
       bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 5000);
     } catch(e) {
-      statusText.textContent = 'Update failed: ' + (e || 'unknown error');
+      setBubbleText('Update failed: ' + (e || 'unknown error'));
       setVisualAnimation('error');
       stateLabel.textContent = 'error';
       updateStateGemTipText('error', String(e || 'unknown error'));
@@ -2020,7 +2033,7 @@ async function downloadAndSelectDlc(dlcName) {
   stateLabel.textContent = 'downloading';
   updateStateGemTipText('downloading', dlcName);
   setVisualAnimation('thinking');
-  statusText.textContent = 'Downloading ' + dlcName + '...';
+  setBubbleText('Downloading ' + dlcName + '...');
   bubble.classList.remove('hidden');
 
   try {
@@ -2038,7 +2051,7 @@ async function downloadAndSelectDlc(dlcName) {
     } catch(e) {}
     await selectChar(dlcName);
   } catch (e) {
-    statusText.textContent = 'Download failed: ' + (e || 'unknown error');
+    setBubbleText('Download failed: ' + (e || 'unknown error'));
     bubble.classList.remove('hidden');
     clearTimeout(bubbleTimeout);
     bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 5000);
@@ -2150,7 +2163,7 @@ async function showSessionPicker() {
   if (sessionPoll) { clearInterval(sessionPoll); sessionPoll = null; }
   const sessions = await window.__TAURI__.core.invoke('list_unlocked_sessions');
   if (sessions.length === 0) {
-    statusText.textContent = 'No session found. Please restart your AI assistant.';
+    setBubbleText('No session found. Please restart your AI assistant.');
     bubble.classList.remove('hidden');
     stateLabel.textContent = 'waiting';
     updateStateGemTipText('waiting', 'No session found');
@@ -2174,7 +2187,7 @@ async function bindToSession(sessionId) {
     charMenu.classList.add('hidden');
     menuBackdrop.classList.add('hidden');
   } catch (e) {
-    statusText.textContent = 'Bind failed: ' + e;
+    setBubbleText('Bind failed: ' + e);
     bubble.classList.remove('hidden');
   }
 }
@@ -2231,16 +2244,16 @@ async function initAssets() {
         stateLabel.textContent = 'downloading';
         updateStateGemTipText('downloading', 'Downloading assets...');
         setVisualAnimation('thinking');
-        statusText.textContent = 'Downloading assets...';
+        setBubbleText('Downloading assets...');
         bubble.classList.remove('hidden');
         try {
           await window.__TAURI__.core.invoke('update_assets');
-          statusText.textContent = 'Assets ready!';
+          setBubbleText('Assets ready!');
           updateStateGemTipText('idle', 'Assets ready!');
           clearTimeout(bubbleTimeout);
           bubbleTimeout = setTimeout(() => bubble.classList.add('hidden'), 3000);
         } catch(e) {
-          statusText.textContent = 'Assets download failed: ' + (e || 'unknown error');
+          setBubbleText('Assets download failed: ' + (e || 'unknown error'));
           setVisualAnimation('error');
           stateLabel.textContent = 'error';
           updateStateGemTipText('error', String(e || 'unknown error'));
@@ -2400,7 +2413,7 @@ async function preloadAssets() {
   // If current mode is a DLC that's not installed, auto-download it
   const isDlcMode = availableDlcs.some(d => d.id === mode);
   if (isDlcMode && !dlcInstalledCache[mode] && window.__TAURI__) {
-    statusText.textContent = 'Downloading ' + mode + '...';
+    setBubbleText('Downloading ' + mode + '...');
     bubble.classList.remove('hidden');
     try {
       await window.__TAURI__.core.invoke('download_dlc', { dlcName: mode });
@@ -2414,7 +2427,7 @@ async function preloadAssets() {
         throw new Error('character.json not found after download');
       }
     } catch(e) {
-      statusText.textContent = 'Download failed, using Ferris';
+      setBubbleText('Download failed, using Ferris');
       mode = 'ferris';
       localStorage.setItem('petMode', mode);
     }
