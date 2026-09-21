@@ -1165,6 +1165,27 @@ mod tests {
     }
 
     #[test]
+    fn test_read_status_appearance_context_is_optional_and_bounded() {
+        let path = std::env::temp_dir().join(format!("pi-pet-appearance-status-{}.json", std::process::id()));
+        let raw = serde_json::json!({
+            "state": "idle", "session_id": "pet_internal", "appearance_context": {
+                "schemaVersion": "1", "source": "pi-forge", "instanceId": "forge_1", "revision": 4,
+                "stackKey": "global:work", "profileKey": "project:profile", "projectKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let status = crate::read_status(&path).unwrap();
+        assert!(status.appearance_context.as_ref().and_then(|v| v.as_ref()).is_some());
+        let encoded = serde_json::to_value(&status).unwrap();
+        assert_eq!(encoded["appearance_context"]["source"], "pi-forge");
+        let malformed = serde_json::json!({"state":"idle", "appearance_context":{"schemaVersion":"1","source":"evil","instanceId":"x","revision":0}});
+        std::fs::write(&path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+        let status = crate::read_status(&path).unwrap();
+        assert!(status.appearance_context.is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn test_read_status_rejects_invalid_team_projection_without_losing_pet_status() {
         let path = std::env::temp_dir().join(format!("pi-pet-bad-team-status-{}.json", std::process::id()));
         let members: Vec<_> = (0..9).map(|index| serde_json::json!({

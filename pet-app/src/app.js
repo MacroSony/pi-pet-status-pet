@@ -17,6 +17,21 @@ const asciiPre = document.getElementById('ascii-art');
 const charMenu = document.getElementById('char-menu');
 const menuBackdrop = document.getElementById('menu-backdrop');
 
+// localStorage can throw in restricted WebViews. All renderer preferences are
+// best-effort and must never prevent the pet from starting.
+const rendererStorage = (() => {
+  try {
+    const s = window.localStorage;
+    return {
+      getItem: (k) => { try { return s.getItem(k); } catch (_) { return null; } },
+      setItem: (k, v) => { try { s.setItem(k, v); } catch (_) {} },
+      removeItem: (k) => { try { s.removeItem(k); } catch (_) {} },
+    };
+  } catch (_) {
+    return { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+  }
+})();
+
 // ── Character data ──
 
 const ASCII_SPECIES = {
@@ -146,7 +161,7 @@ const GIF_MODES = {};
 const CHARACTER_CONFIGS = {};
 const DEFAULT_APPEARANCE = Object.freeze({
   motion: 'full', uiPreset: 'classic', artScale: 1,
-  bubble: 'all', stateLabel: 'always', identity: 'always',
+  bubble: 'all', stateLabel: 'always', identity: 'always', petScale: 1,
 });
 const APPEARANCE_VALUES = Object.freeze({
   motion: ['intrinsic', 'subtle', 'full'],
@@ -155,6 +170,7 @@ const APPEARANCE_VALUES = Object.freeze({
   bubble: ['off', 'alerts', 'all'],
   stateLabel: ['off', 'minimal', 'alerts', 'always'],
   identity: ['hidden', 'hover', 'always'],
+  petScale: null,
 });
 
 // Ferris SVG map loaded from character.json (populated at init, fallback to hardcoded)
@@ -299,15 +315,20 @@ function getWatchdogConfig(config) {
 }
 
 // ── State ──
-let mode = localStorage.getItem('petMode') || 'ferris';
-let eye = localStorage.getItem('petEye') || '·';
-let petColor = localStorage.getItem('petColor') || '';
-let petBgColor = localStorage.getItem('petBgColor') || '';
-let petFillColor = localStorage.getItem('petFillColor') || '';
-let petTextColor = localStorage.getItem('petTextColor') || '';
-let petSessionBg = localStorage.getItem('petSessionBg') || '';
-let petFontSize = parseInt(localStorage.getItem('petFontSize') || '16');
-let petScale = parseFloat(localStorage.getItem('petScale') || '1');
+// Legacy keys are read only by the one-time migration in this resolver. New
+// selections never write petMode or global sizing keys.
+let appearancePrefs = null;
+try { appearancePrefs = (typeof PetAppearance !== 'undefined') ? PetAppearance.create(rendererStorage) : null; } catch (_) { appearancePrefs = null; }
+let mode = appearancePrefs ? appearancePrefs.resolve('', null).character : 'ferris';
+const storageGet = (key) => { try { return rendererStorage.getItem(key); } catch (_) { return null; } };
+let eye = storageGet('petEye') || '·';
+let petColor = storageGet('petColor') || '';
+let petBgColor = storageGet('petBgColor') || '';
+let petFillColor = storageGet('petFillColor') || '';
+let petTextColor = storageGet('petTextColor') || '';
+let petSessionBg = storageGet('petSessionBg') || '';
+let petFontSize = parseInt(storageGet('petFontSize') || '16');
+let petScale = appearancePrefs ? appearancePrefs.resolve('', null).appearance.petScale : 1;
 let currentBusinessState = 'idle';
 let currentBusinessDetail = '';
 // Empty string (not 'idle') so the first updateStatus always renders —
@@ -318,7 +339,7 @@ let currentState = 'idle';
 let activeCharacterConfig = null;
 let latestStatus = null;
 let initialized = false;
-let identityPinned = localStorage.getItem('petIdentityPinned') === 'true';
+let identityPinned = storageGet('petIdentityPinned') === 'true';
 let currentImgSrc = '';
 let bubbleTimeout = null;
 // Tracks an expression text bubble independently from the optional reaction
@@ -331,8 +352,28 @@ let appVersion = '0.0.0';
 let customPacks = [];
 let availableDlcs = [];  // [{id, name, installed}] from dlc/*.json
 let boundSessionId = '';
+let appearanceContext = null;
+let appearanceResolution = appearancePrefs ? appearancePrefs.resolve('', null) : { character:'ferris', appearance:{...DEFAULT_APPEARANCE, petScale:1}, source:'fallback' };
+let ephemeralAppearanceOverrides = {};
 let sessionPoll = null;
+let bindGeneration = 0;
+// Presentation epochs invalidate every pending asset/transition completion.
+// They are separate from binding generations: status context events must not
+// cancel an in-flight rebind operation.
+let renderGeneration = 0;
 const dlcInstalledCache = {};
+function newRenderToken() { return { generation: renderGeneration, mode }; }
+function renderTokenCurrent(token) { return !!token && token.generation === renderGeneration && token.mode === mode; }
+function invalidatePresentation() {
+  renderGeneration++;
+  reactionRequestVersion++;
+  activeExpressionBubble = null;
+  clearTimeout(bubbleTimeout);
+  bubbleTimeout = null;
+  cancelActiveOneShot();
+  clearTimeout(idleVariationTimer); idleVariationTimer = null;
+  clearTimeout(autoReturnTimer); autoReturnTimer = null;
+}
 
 let activeOneShot = null;      // Currently active one-shot { type, priority, targetState, timerIds }
 let autoReturnTimer = null;    // Timer for auto-return decay
@@ -414,34 +455,55 @@ function startDrag(event) {
 }
 
 function registerCharacterConfig(id, config) {
-  if (!config || !config.states || typeof config.states !== 'object') return;
+  const validFrames = (frames) => Array.isArray(frames) && frames.length > 0 && frames.every(path =>
+    typeof path === 'string' && path.length <= 512 && !/[\\\\\0\r\n:]/.test(path)
+    && !path.startsWith('/') && !path.split('/').includes('..'));
+  if (!appearancePrefs?.safeId(id) || !config || !config.states || Array.isArray(config.states)
+      || typeof config.states !== 'object' || !validFrames(config.states.idle)
+      || !Object.values(config.states).every(validFrames)) return false;
   CHARACTER_CONFIGS[id] = config;
   GIF_MODES[id] = config.states;
+  return true;
 }
 
 function activeAppearance() {
   const suggested = (activeCharacterConfig && activeCharacterConfig.appearance) || {};
-  const result = {};
+  let resolved = appearanceResolution;
+  if (appearancePrefs) {
+    const requested = appearancePrefs.resolve(boundSessionId, appearanceContext);
+    resolved = requested.character !== mode
+      ? appearancePrefs.resolveCharacter(boundSessionId, appearanceContext, mode, suggested)
+      : appearancePrefs.resolve(boundSessionId, appearanceContext, suggested);
+  }
+  const result = { ...((resolved && resolved.appearance) || DEFAULT_APPEARANCE), ...(!boundSessionId ? ephemeralAppearanceOverrides : {}) };
   for (const [key, fallback] of Object.entries(DEFAULT_APPEARANCE)) {
-    const saved = localStorage.getItem(`petAppearance.${key}`);
-    let value = saved === null ? suggested[key] : saved;
-    if (key === 'artScale') {
-      value = Number(value);
-      result[key] = Number.isFinite(value) && value >= 0.7 && value <= 1.5 ? value : fallback;
-    } else {
-      result[key] = APPEARANCE_VALUES[key].includes(value) ? value : fallback;
-    }
+    // Pack suggestions apply only when no stored value exists for this character.
+    if (appearancePrefs && result[key] !== undefined) continue;
+    const value = suggested[key];
+    result[key] = key === 'artScale' ? (Number.isFinite(Number(value)) ? Number(value) : fallback) : (APPEARANCE_VALUES[key]?.includes(value) ? value : fallback);
   }
   return result;
 }
 
+function appearanceSourceLabel() {
+  const r = appearanceResolution;
+  if (r && r.fallbackCharacter) return `Missing ${r.requestedCharacter}; using Ferris fallback`;
+  return r.source === 'session' ? 'Session override' : r.source === 'profile' ? 'Profile binding' : r.source === 'stack' ? 'Stack binding' : r.source === 'global' ? 'New-session default' : 'Built-in Ferris fallback';
+}
+
 function setAppearance(key, value) {
-  localStorage.setItem(`petAppearance.${key}`, String(value));
+  if (appearancePrefs && boundSessionId) appearancePrefs.setAppearance(boundSessionId, mode, key, value);
+  else ephemeralAppearanceOverrides[key] = value;
   applyConfig();
 }
 
 function clearAppearanceOverrides() {
-  for (const key of Object.keys(DEFAULT_APPEARANCE)) localStorage.removeItem(`petAppearance.${key}`);
+  ephemeralAppearanceOverrides = {};
+  if (appearancePrefs && boundSessionId) {
+    for (const key of Object.keys(appearancePrefs.defaults)) appearancePrefs.setAppearance(boundSessionId, mode, key, undefined);
+  }
+  petScale = 1;
+  // Legacy keys remain untouched for rollback; migration is one-time.
 }
 
 function compactSessionName(value) {
@@ -479,6 +541,10 @@ function updateStateGemTipText(state, detail) {
 
 // ── Apply visual config ──
 function applyConfig() {
+  // Resolve first. Container/gem sizing must use the new preference, not the
+  // previous frame's petScale.
+  const appearance = activeAppearance();
+  petScale = Number.isFinite(Number(appearance.petScale)) ? Number(appearance.petScale) : 1;
   const colorProps = [
     [asciiPre, 'color', petColor],
     [stateLabel, 'color', petColor],
@@ -512,7 +578,6 @@ function applyConfig() {
   container.style.height = Math.round(240 * petScale) + 'px';
 
   // Global scale controls the window/chrome. Art scale is deliberately independent.
-  const appearance = activeAppearance();
   const artSize = Math.round(140 * appearance.artScale * petScale);
   artStage.style.width = artSize + 'px';
   artStage.style.height = artSize + 'px';
@@ -547,7 +612,7 @@ function applyConfig() {
 }
 
 function saveConfig(key, value) {
-  localStorage.setItem(key, value);
+  try { rendererStorage.setItem(key, value); } catch (_) {}
   applyConfig();
 }
 
@@ -563,7 +628,8 @@ function showAscii() {
   asciiPre.style.display = 'block';
 }
 
-function setImage(src) {
+function setImage(src, token = newRenderToken()) {
+  if (!renderTokenCurrent(token)) return;
   const resolved = assetUrl(src);
   if (resolved === currentImgSrc) return;
   // Keep the current frame visible while an uncached external asset loads,
@@ -571,13 +637,14 @@ function setImage(src) {
   // like the idle loop blinked instead of actually changing animation.
   if (resolved === src && hasExternalAssets && window.__TAURI__) {
     loadAsset(src).then(url => {
-      if (url !== src) setImage(src); // retry with cached version
+      if (!renderTokenCurrent(token)) return;
+      if (url !== src) setImage(src, token); // retry with cached version
       else {
         currentImgSrc = src;
         imgEl.src = src;
         imgEl.style.opacity = '1';
       }
-    });
+    }).catch(() => {});
     return;
   }
   currentImgSrc = resolved;
@@ -644,10 +711,11 @@ function cancelActiveOneShot() {
   activeOneShot = null;
 }
 
-async function verifyImageAsset(path) {
-  if (!path) return null;
+async function verifyImageAsset(path, token = newRenderToken()) {
+  if (!path || !renderTokenCurrent(token)) return null;
   try {
     const resolved = await loadAsset(path);
+    if (!renderTokenCurrent(token)) return null;
     const url = assetUrl(path);
     return new Promise((resolve) => {
       let settled = false;
@@ -659,6 +727,7 @@ async function verifyImageAsset(path) {
         }
       }, 2000);
       img.onload = () => {
+        if (!renderTokenCurrent(token)) { settled = true; clearTimeout(timer); resolve(null); return; }
         if (!settled) {
           settled = true;
           clearTimeout(timer);
@@ -680,6 +749,9 @@ async function verifyImageAsset(path) {
 }
 
 function startStateLoop(state) {
+  // A normal loop is a new request as well; invalidate any verification that
+  // is still awaiting an older transition/reaction.
+  renderGeneration++;
   cancelActiveOneShot();
   visualState = state;
   currentState = currentBusinessState;
@@ -712,6 +784,7 @@ function startStateLoop(state) {
 }
 
 async function playTransition(fromState, toState, transitionConfig) {
+  const token = { generation: ++renderGeneration, mode };
   cancelActiveOneShot();
   clearTimeout(idleVariationTimer);
   idleVariationTimer = null;
@@ -727,8 +800,9 @@ async function playTransition(fromState, toState, transitionConfig) {
   // Pre-verify all frames for silent degradation
   const verifiedUrls = [];
   for (const f of frames) {
-    const url = await verifyImageAsset(f);
+    const url = await verifyImageAsset(f, token);
     if (!url) {
+      if (!renderTokenCurrent(token)) return;
       // Missing asset: silent fallback to normal loop with ~150ms fade
       startStateLoop(toState);
       return;
@@ -736,6 +810,7 @@ async function playTransition(fromState, toState, transitionConfig) {
     verifiedUrls.push(url);
   }
 
+  if (!renderTokenCurrent(token)) return;
   const timerIds = [];
   const oneShot = {
     type: 'transition',
@@ -749,9 +824,9 @@ async function playTransition(fromState, toState, transitionConfig) {
   setVisualAnimation('appear');
 
   if (verifiedUrls.length === 1) {
-    setImage(frames[0]);
+    setImage(frames[0], token);
     const endTimer = setTimeout(() => {
-      if (activeOneShot === oneShot) {
+      if (activeOneShot === oneShot && renderTokenCurrent(token)) {
         activeOneShot = null;
         startStateLoop(toState);
       }
@@ -759,10 +834,10 @@ async function playTransition(fromState, toState, transitionConfig) {
     timerIds.push(endTimer);
   } else {
     const frameTime = Math.max(50, Math.floor(duration / verifiedUrls.length));
-    setImage(frames[0]);
+    setImage(frames[0], token);
     for (let idx = 1; idx < verifiedUrls.length; idx++) {
       const ft = setTimeout(() => {
-        if (activeOneShot === oneShot) {
+        if (activeOneShot === oneShot && renderTokenCurrent(token)) {
           imgEl.src = verifiedUrls[idx];
           currentImgSrc = verifiedUrls[idx];
           imgEl.style.opacity = '1';
@@ -772,7 +847,7 @@ async function playTransition(fromState, toState, transitionConfig) {
     }
 
     const endTimer = setTimeout(() => {
-      if (activeOneShot === oneShot) {
+      if (activeOneShot === oneShot && renderTokenCurrent(token)) {
         activeOneShot = null;
         startStateLoop(toState);
       }
@@ -782,6 +857,7 @@ async function playTransition(fromState, toState, transitionConfig) {
 }
 
 async function playIdleVariation(variationConfig) {
+  const token = { generation: ++renderGeneration, mode };
   if (visualState !== 'idle' || activeOneShot) return;
 
   const frames = variationConfig.frames || [];
@@ -795,8 +871,9 @@ async function playIdleVariation(variationConfig) {
   // Pre-verify assets
   const verifiedUrls = [];
   for (const f of frames) {
-    const url = await verifyImageAsset(f);
+    const url = await verifyImageAsset(f, token);
     if (!url) {
+      if (!renderTokenCurrent(token)) return;
       // Missing asset: silently skip this variation
       scheduleNextIdleVariation();
       return;
@@ -804,6 +881,7 @@ async function playIdleVariation(variationConfig) {
     verifiedUrls.push(url);
   }
 
+  if (!renderTokenCurrent(token)) return;
   const timerIds = [];
   const oneShot = {
     type: 'variation',
@@ -816,9 +894,9 @@ async function playIdleVariation(variationConfig) {
   showImage();
 
   if (verifiedUrls.length === 1) {
-    setImage(frames[0]);
+    setImage(frames[0], token);
     const endTimer = setTimeout(() => {
-      if (activeOneShot === oneShot) {
+      if (activeOneShot === oneShot && renderTokenCurrent(token)) {
         activeOneShot = null;
         startStateLoop('idle');
       }
@@ -826,10 +904,10 @@ async function playIdleVariation(variationConfig) {
     timerIds.push(endTimer);
   } else {
     const frameTime = Math.max(50, Math.floor(duration / verifiedUrls.length));
-    setImage(frames[0]);
+    setImage(frames[0], token);
     for (let idx = 1; idx < verifiedUrls.length; idx++) {
       const ft = setTimeout(() => {
-        if (activeOneShot === oneShot) {
+        if (activeOneShot === oneShot && renderTokenCurrent(token)) {
           imgEl.src = verifiedUrls[idx];
           currentImgSrc = verifiedUrls[idx];
           imgEl.style.opacity = '1';
@@ -839,7 +917,7 @@ async function playIdleVariation(variationConfig) {
     }
 
     const endTimer = setTimeout(() => {
-      if (activeOneShot === oneShot) {
+      if (activeOneShot === oneShot && renderTokenCurrent(token)) {
         activeOneShot = null;
         startStateLoop('idle');
       }
@@ -926,7 +1004,9 @@ async function findReactionAsset(emotion, isCurrent) {
 
 async function playExpression(event) {
   if (ALERT_STATES.has(currentBusinessState) || dragSession) return;
+  const token = newRenderToken();
   const requestVersion = ++reactionRequestVersion;
+  if (!renderTokenCurrent(token)) return;
 
   const payload = (event && event.payload) || {};
   const text = typeof payload.text === 'string' && payload.text.trim().length > 0 ? payload.text : null;
@@ -953,7 +1033,7 @@ async function playExpression(event) {
     }, 50);
 
     bubbleTimeout = setTimeout(() => {
-      if (activeExpressionBubble !== expressionBubble) return;
+      if (!renderTokenCurrent(token) || activeExpressionBubble !== expressionBubble) return;
       bubbleTimeout = null;
       activeExpressionBubble = null;
       // Restore business bubble display according to the latest status & policy.
@@ -977,7 +1057,7 @@ async function playExpression(event) {
       () => requestVersion === reactionRequestVersion,
     );
 
-    if (!reactionPath || ALERT_STATES.has(currentBusinessState) || dragSession) {
+    if (!reactionPath || !renderTokenCurrent(token) || ALERT_STATES.has(currentBusinessState) || dragSession) {
       // Missing animation asset: reaction skipped silently, text remains visible.
       return;
     }
@@ -1000,7 +1080,7 @@ async function playExpression(event) {
     setImage(reactionPath);
 
     const endTimer = setTimeout(() => {
-      if (activeOneShot === oneShot) {
+      if (activeOneShot === oneShot && renderTokenCurrent(token)) {
         activeOneShot = null;
         startStateLoop(oneShot.targetState);
       }
@@ -1419,11 +1499,57 @@ async function openTeamBoard() {
   }
 }
 
+let forgeInstanceId = null;
+let forgeRevision = -1;
+// Epoch retirement is scoped to a bound session. A session can be revisited
+// without inheriting another session's instance tombstones.
+const retiredForgeInstances = new Map();
+function retireForgeInstance(sessionId, instanceId) {
+  if (!sessionId || !instanceId) return;
+  const list = retiredForgeInstances.get(sessionId) || [];
+  if (!list.includes(instanceId)) list.push(instanceId);
+  while (list.length > 8) list.shift();
+  retiredForgeInstances.set(sessionId, list);
+  while (retiredForgeInstances.size > 64) retiredForgeInstances.delete(retiredForgeInstances.keys().next().value);
+}
+function processAppearanceContext(status) {
+  const hasContext = Object.prototype.hasOwnProperty.call(status || {}, 'appearance_context') || Object.prototype.hasOwnProperty.call(status || {}, 'appearanceContext');
+  if (!hasContext || !appearancePrefs) return false;
+  const raw = status.appearance_context !== undefined ? status.appearance_context : status.appearanceContext;
+  const next = raw === null ? null : appearancePrefs.cleanContext(raw);
+  if (raw !== null && !next) return false; // fail closed without changing a valid prior context
+  const retired = retiredForgeInstances.get(boundSessionId) || [];
+  if (next && retired.includes(next.instanceId) && next.instanceId !== forgeInstanceId) return false;
+  if (next && forgeInstanceId === next.instanceId && next.revision !== null && next.revision <= forgeRevision) return false;
+  if (next) {
+    if (forgeInstanceId && forgeInstanceId !== next.instanceId) retireForgeInstance(boundSessionId, forgeInstanceId);
+    forgeInstanceId = next.instanceId; forgeRevision = next.revision;
+  }
+  else {
+    // Clearing context retires the current epoch before resetting it, so a
+    // delayed event from the old forge cannot restore stale bindings.
+    retireForgeInstance(boundSessionId, forgeInstanceId);
+    forgeInstanceId = null; forgeRevision = -1;
+  }
+  appearanceContext = next;
+  return applyAppearanceResolution(true);
+}
+
 function updateStatus(status, isRealEvent = false, presentationOnly = false) {
+  status = (status && typeof status === 'object') ? status : {};
   if (isRealEvent) {
     lastStatusEventAt = Date.now();
   }
   statusUpdateVersion++;
+  const advertisedSession = status.session_id || status.sessionId || '';
+  if (boundSessionId && advertisedSession && advertisedSession !== boundSessionId) return;
+  if (advertisedSession && !boundSessionId) {
+    boundSessionId = advertisedSession;
+    // Startup status may beat get_session_id and contain no context; restore
+    // the session preference immediately rather than waiting for a later event.
+    applyAppearanceResolution(false);
+  }
+  processAppearanceContext(status);
   const state = status.state || 'idle';
   const detail = status.detail || '';
   const sessionName = status.session_name || '';
@@ -1572,6 +1698,12 @@ function updateStatus(status, isRealEvent = false, presentationOnly = false) {
 }
 
 // ── Menu ──
+
+function refreshAppearancePresentation() {
+  applyAppearanceResolution(true);
+  if (initialized) updateStatus(latestStatus || { state: currentBusinessState, detail: currentBusinessDetail }, false, true);
+  buildMenu();
+}
 
 function addMenuItem(parent, text, onclick, cls) {
   const el = document.createElement('div');
@@ -1734,7 +1866,9 @@ function buildMenu() {
     customLabel.textContent = 'Custom';
     charMenu.appendChild(customLabel);
     for (const pack of customPacks) {
-      addMenuItem(charMenu, pack.name, () => selectChar(pack.id), mode === pack.id ? 'active' : '');
+      const available = knownCharacter(pack.id);
+      const label = (pack.name || pack.id) + (available ? '' : ' (unavailable — Ferris fallback)');
+      addMenuItem(charMenu, label, () => selectChar(pack.id), mode === pack.id ? 'active' : '');
     }
   }
 
@@ -1932,7 +2066,22 @@ function buildAsciiPage() {
 
 function buildConfigPage() {
   const appearance = activeAppearance();
+  const ctx = appearanceContext;
+  const canBindStack = !!(ctx && ctx.stackKey && appearancePrefs?.safeScope(ctx.stackKey) && (ctx.stackKey.startsWith('global:') || ctx.projectKey));
+  const canBindProfile = !!(ctx && ctx.profileKey && appearancePrefs?.safeScope(ctx.profileKey) && (ctx.profileKey.startsWith('global:') || ctx.projectKey));
   addMenuItem(charMenu, '← Back', () => { menuPage = 'main'; buildMenu(); });
+  addMenuItem(charMenu, `Appearance source: ${appearanceSourceLabel()}`, () => {}, 'menu-section-label');
+  addMenuItem(charMenu, 'Follow binding / clear session override', () => { if (appearancePrefs) appearancePrefs.clearSession(boundSessionId); refreshAppearancePresentation(); }, !boundSessionId ? 'disabled' : '');
+  addMenuItem(charMenu, 'Set current as new-session default', () => { if (appearancePrefs) appearancePrefs.setGlobal(mode); buildMenu(); });
+  if (canBindProfile) {
+    addMenuItem(charMenu, `Bind Profile to ${mode}`, () => { appearancePrefs.bind('profile', ctx.profileKey, mode, ctx.projectKey); refreshAppearancePresentation(); });
+    addMenuItem(charMenu, 'Unbind current Profile', () => { appearancePrefs.unbind('profile', ctx.profileKey, ctx.projectKey); refreshAppearancePresentation(); });
+  }
+  if (canBindStack) {
+    addMenuItem(charMenu, `Bind Stack to ${mode}`, () => { appearancePrefs.bind('stack', ctx.stackKey, mode, ctx.projectKey); refreshAppearancePresentation(); });
+    addMenuItem(charMenu, 'Unbind current Stack', () => { appearancePrefs.unbind('stack', ctx.stackKey, ctx.projectKey); refreshAppearancePresentation(); });
+  }
+  addDivider(charMenu);
   addDivider(charMenu);
   addMenuItem(charMenu, 'Desktop activity area…', async () => {
     closeMenu();
@@ -1948,10 +2097,10 @@ function buildConfigPage() {
   addSliderRow(charMenu, 'Art size', appearance.artScale, 0.7, 1.5, 0.05, (v) => setAppearance('artScale', v), '%');
   addChoiceRow(charMenu, 'Bubble', appearance.bubble, [['off', 'Off'], ['alerts', 'Alerts'], ['all', 'All']], (v) => setAppearance('bubble', v));
   addChoiceRow(charMenu, 'State', appearance.stateLabel, [['off', 'Off'], ['minimal', 'Minimal'], ['alerts', 'Alerts'], ['always', 'Always']], (v) => setAppearance('stateLabel', v));
-  addChoiceRow(charMenu, 'Identity', appearance.identity, [['hidden', 'Hidden'], ['hover', 'Hover'], ['always', 'Always']], (v) => { identityPinned = false; localStorage.removeItem('petIdentityPinned'); setAppearance('identity', v); });
-  if (sessionNameEl.textContent) addMenuItem(charMenu, identityPinned ? 'Unpin identity' : 'Pin identity', () => { identityPinned = !identityPinned; localStorage.setItem('petIdentityPinned', String(identityPinned)); applyConfig(); buildConfigPage(); });
+  addChoiceRow(charMenu, 'Identity', appearance.identity, [['hidden', 'Hidden'], ['hover', 'Hover'], ['always', 'Always']], (v) => { identityPinned = false; rendererStorage.removeItem('petIdentityPinned'); setAppearance('identity', v); });
+  if (sessionNameEl.textContent) addMenuItem(charMenu, identityPinned ? 'Unpin identity' : 'Pin identity', () => { identityPinned = !identityPinned; rendererStorage.setItem('petIdentityPinned', String(identityPinned)); applyConfig(); buildConfigPage(); });
   addDivider(charMenu);
-  addSliderRow(charMenu, 'Scale', petScale, 1, 2, 0.1, (v) => { petScale = v; saveConfig('petScale', String(v)); }, '%');
+  addSliderRow(charMenu, 'Scale', appearance.petScale, 1, 2, 0.1, (v) => setAppearance('petScale', v), '%');
   addColorRow(charMenu, 'Text', petTextColor, '#ffffff', (v) => { petTextColor = v; saveConfig('petTextColor', v); });
   addColorRow(charMenu, 'Label', petSessionBg, '#e06c3c', (v) => { petSessionBg = v; saveConfig('petSessionBg', v); }, true);
   addColorRow(charMenu, 'ASCII Fill', petFillColor, '#ffffff', (v) => { petFillColor = v; saveConfig('petFillColor', v); });
@@ -1968,7 +2117,8 @@ function buildConfigPage() {
       await window.__TAURI__.core.invoke('update_assets');
       // Refresh DLC list after update
       try {
-        availableDlcs = await window.__TAURI__.core.invoke('list_available_dlcs');
+        const listedDlcs = await window.__TAURI__.core.invoke('list_available_dlcs');
+        availableDlcs = Array.isArray(listedDlcs) ? listedDlcs.filter(d => d && typeof d === 'object' && typeof d.id === 'string') : [];
         for (const dlc of availableDlcs) {
           dlcInstalledCache[dlc.id] = dlc.installed;
         }
@@ -1996,10 +2146,10 @@ function buildConfigPage() {
   addDivider(charMenu);
   addMenuItem(charMenu, 'Reset Default', () => {
     petScale = 1; petTextColor = ''; petSessionBg = ''; petFillColor = ''; petBgColor = '';
-    identityPinned = false; clearAppearanceOverrides(); localStorage.removeItem('petIdentityPinned');
-    localStorage.removeItem('petScale'); localStorage.removeItem('petTextColor');
-    localStorage.removeItem('petSessionBg'); localStorage.removeItem('petFillColor');
-    localStorage.removeItem('petBgColor');
+    identityPinned = false; clearAppearanceOverrides(); rendererStorage.removeItem('petIdentityPinned');
+    rendererStorage.removeItem('petTextColor');
+    rendererStorage.removeItem('petSessionBg'); rendererStorage.removeItem('petFillColor');
+    rendererStorage.removeItem('petBgColor');
     applyConfig();
     buildConfigPage();
   }, 'menu-item-danger');
@@ -2060,12 +2210,49 @@ async function downloadAndSelectDlc(dlcName) {
   }
 }
 
+function knownCharacter(id) {
+  // A retained descriptor is not availability. Only a validated config (or a
+  // built-in ASCII species) can be rendered.
+  return id === 'ferris' || Object.prototype.hasOwnProperty.call(GIF_MODES, id)
+    || Object.prototype.hasOwnProperty.call(ASCII_SPECIES, id);
+}
+
+function applyAppearanceResolution(resetAnimation = true) {
+  const requested = appearancePrefs ? appearancePrefs.resolve(boundSessionId, appearanceContext) : appearanceResolution;
+  const wanted = requested.character;
+  const nextMode = knownCharacter(wanted) ? wanted : 'ferris';
+  const actual = appearancePrefs && nextMode !== wanted
+    ? appearancePrefs.resolveCharacter(boundSessionId, appearanceContext, nextMode, (CHARACTER_CONFIGS[nextMode] || {}).appearance)
+    : (appearancePrefs ? appearancePrefs.resolve(boundSessionId, appearanceContext, (CHARACTER_CONFIGS[nextMode] || {}).appearance) : requested);
+  appearanceResolution = { ...actual, requestedCharacter: wanted, fallbackCharacter: nextMode !== wanted };
+  const changed = nextMode !== mode;
+  if (changed) {
+    mode = nextMode;
+    cachedDragReactionMode = null;
+    cachedDragReactionPath = null;
+    activeCharacterConfig = CHARACTER_CONFIGS[mode] || null;
+  }
+  // Cosmetic context revisions must not cancel reactions, pending loads, or
+  // restart the current animation when the resolved character is unchanged.
+  if (changed) {
+    invalidatePresentation();
+    visualState = '';
+  }
+  applyConfig();
+  return changed;
+}
+
 async function selectChar(newMode) {
-  mode = newMode;
+  if (!appearancePrefs || appearancePrefs.safeId(newMode)) {
+    if (appearancePrefs && boundSessionId) appearancePrefs.setSessionCharacter(boundSessionId, newMode);
+  }
+  // Keep the requested ID persisted even when its descriptor is broken, but
+  // render the validated actual mode immediately.
+  if (appearancePrefs && boundSessionId) applyAppearanceResolution(true);
+  else mode = knownCharacter(newMode) ? newMode : 'ferris';
   cachedDragReactionMode = null;
   cachedDragReactionPath = null;
   activeCharacterConfig = CHARACTER_CONFIGS[mode] || null;
-  localStorage.setItem('petMode', mode);
   closeMenu();
   currentImgSrc = '';
 
@@ -2083,7 +2270,8 @@ async function selectChar(newMode) {
 
   // Preload remaining assets in the background
   if (GIF_MODES[mode] && hasExternalAssets) {
-    preloadAssets();
+    const generation = bindGeneration;
+    preloadAssets().catch(() => {}).then(() => { if (generation !== bindGeneration) return; });
   }
 }
 
@@ -2181,9 +2369,24 @@ async function showSessionPicker() {
 }
 
 async function bindToSession(sessionId) {
+  const generation = ++bindGeneration;
+  if (!appearancePrefs?.safeId(sessionId)) return;
   try {
     await window.__TAURI__.core.invoke('bind_session', { sessionId });
+    if (generation !== bindGeneration) return;
     boundSessionId = sessionId;
+    ephemeralAppearanceOverrides = {};
+    // Leaving a session does not retire its still-live Forge publisher.
+    appearanceContext = null; forgeInstanceId = null; forgeRevision = -1;
+    invalidatePresentation();
+    visualState = '';
+    applyAppearanceResolution(true);
+    // The new watcher's initial event can arrive before bind_session resolves.
+    // Query after binding rather than replaying the previous session's status.
+    const statusVersion = statusUpdateVersion;
+    const boundStatus = await window.__TAURI__.core.invoke('get_status');
+    if (generation !== bindGeneration) return;
+    if (boundStatus && statusVersion === statusUpdateVersion) updateStatus(boundStatus, false, true);
     charMenu.classList.add('hidden');
     menuBackdrop.classList.add('hidden');
   } catch (e) {
@@ -2199,7 +2402,12 @@ if (window.__TAURI__) {
   window.__TAURI__.event.listen('pet-event', (e) => handlePetEvent(e.payload));
   window.__TAURI__.core.invoke('get_session_id').then((sid) => {
     if (sid) {
-      boundSessionId = sid;
+      if (!boundSessionId || boundSessionId !== sid) {
+        boundSessionId = sid;
+        applyAppearanceResolution(false);
+      } else {
+        applyAppearanceResolution(false);
+      }
     } else {
       // No explicit session — show session picker
       showSessionPicker();
@@ -2238,7 +2446,8 @@ async function initAssets() {
     if (hasExternalAssets) {
       const assetsDir = await window.__TAURI__.core.invoke('get_assets_dir');
       // Check if the dlc/ subdirectory exists by trying to list DLCs
-      const dlcs = await window.__TAURI__.core.invoke('list_available_dlcs');
+      const listedDlcs = await window.__TAURI__.core.invoke('list_available_dlcs');
+      const dlcs = Array.isArray(listedDlcs) ? listedDlcs : [];
       if (dlcs.length === 0) {
         // Assets dir exists but has no DLC configs — need to download
         stateLabel.textContent = 'downloading';
@@ -2379,7 +2588,8 @@ async function preloadAssets() {
   if (window.__TAURI__) {
     // Load available DLCs from dlc/*.json configs
     try {
-      availableDlcs = await window.__TAURI__.core.invoke('list_available_dlcs');
+      const listedDlcs = await window.__TAURI__.core.invoke('list_available_dlcs');
+      availableDlcs = Array.isArray(listedDlcs) ? listedDlcs.filter(d => d && typeof d === 'object' && typeof d.id === 'string') : [];
       for (const dlc of availableDlcs) {
         dlcInstalledCache[dlc.id] = dlc.installed;
         if (dlc.installed) {
@@ -2397,7 +2607,7 @@ async function preloadAssets() {
     if (hasExternalAssets) {
       try {
         const packs = await window.__TAURI__.core.invoke('list_character_packs');
-        customPacks = packs.filter(p => p.group === 'custom' && p.installed);
+        customPacks = Array.isArray(packs) ? packs.filter(p => p && typeof p === 'object' && typeof p.id === 'string' && appearancePrefs?.safeId(p.id) && p.group === 'custom' && p.installed) : [];
         for (const pack of customPacks) {
           try {
             const jsonStr = await window.__TAURI__.core.invoke('load_text_asset', { path: pack.id + '/character.json' });
@@ -2429,7 +2639,6 @@ async function preloadAssets() {
     } catch(e) {
       setBubbleText('Download failed, using Ferris');
       mode = 'ferris';
-      localStorage.setItem('petMode', mode);
     }
   }
 
@@ -2437,8 +2646,10 @@ async function preloadAssets() {
   const knownMode = mode === 'ferris' || GIF_MODES[mode] || ASCII_SPECIES[mode] || customPacks.some(p => p.id === mode);
   if (!knownMode) {
     mode = 'ferris';
-    localStorage.setItem('petMode', mode);
   }
+  // Re-resolve after packs/DLCs are known. An unavailable mapped pack falls
+  // back visually but the stored mapping is deliberately retained.
+  applyAppearanceResolution(false);
 
   // If current mode has external assets, preload it
   if (GIF_MODES[mode] && hasExternalAssets) {

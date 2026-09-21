@@ -115,6 +115,18 @@ struct TeamPresentation {
     board: TeamBoardPresentation,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AppearanceContext {
+    schema_version: String,
+    source: String,
+    instance_id: String,
+    revision: u64,
+    stack_key: Option<String>,
+    profile_key: Option<String>,
+    project_key: Option<String>,
+}
+
 #[derive(Clone, Serialize)]
 struct StatusPayload {
     state: String,
@@ -124,6 +136,8 @@ struct StatusPayload {
     session_id: String,
     session_name: String,
     team: Option<TeamPresentation>,
+    #[serde(rename = "appearance_context", skip_serializing_if = "Option::is_none")]
+    appearance_context: Option<Option<AppearanceContext>>,
 }
 
 fn emit_status_update(handle: &tauri::AppHandle, status: StatusPayload) {
@@ -232,6 +246,12 @@ fn default_status_path() -> PathBuf {
 fn read_status(path: &PathBuf) -> Option<StatusPayload> {
     let content = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let appearance_context = match v.get("appearance_context").or_else(|| v.get("appearanceContext")) {
+        None => None,
+        Some(value) if value.is_null() => Some(None),
+        Some(value) => serde_json::from_value::<AppearanceContext>(value.clone()).ok()
+            .filter(valid_appearance_context).map(Some),
+    };
     let team = v.get("team")
         .filter(|value| !value.is_null())
         .and_then(|value| serde_json::from_value::<TeamPresentation>(value.clone()).ok())
@@ -244,7 +264,31 @@ fn read_status(path: &PathBuf) -> Option<StatusPayload> {
         session_id: v["session_id"].as_str().unwrap_or("").to_string(),
         session_name: v["session_name"].as_str().unwrap_or("").to_string(),
         team,
+        appearance_context,
     })
+}
+
+fn valid_appearance_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && !value.contains("..") && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn valid_appearance_scope(value: &str) -> bool {
+    let Some((kind, name)) = value.split_once(':') else { return false; };
+    matches!(kind, "global" | "project") && valid_appearance_id(name)
+}
+
+fn valid_project_key(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) && value.chars().all(|c| !c.is_ascii_uppercase())
+}
+
+fn valid_appearance_context(value: &AppearanceContext) -> bool {
+    value.schema_version == "1"
+        && value.source == "pi-forge"
+        && valid_appearance_id(&value.instance_id)
+        && value.revision <= 9_007_199_254_740_991
+        && value.stack_key.as_ref().map_or(true, |v| valid_appearance_scope(v))
+        && value.profile_key.as_ref().map_or(true, |v| valid_appearance_scope(v))
+        && value.project_key.as_ref().map_or(true, |v| valid_project_key(v))
 }
 
 fn has_forbidden_presentation_control(value: &str) -> bool {
@@ -874,6 +918,7 @@ fn bind_session(
                                 session_id: String::new(),
                                 session_name: String::new(),
                                 team: None,
+                                appearance_context: None,
                             });
                         }
                     }
@@ -2171,6 +2216,7 @@ pub fn run() {
                             session_id: "demo".to_string(),
                             session_name: "Demo Mode".to_string(),
                             team: None,
+                            appearance_context: None,
                         });
                         i += 1;
                         std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -2271,6 +2317,7 @@ pub fn run() {
                                             session_id: String::new(),
                                             session_name: String::new(),
                                             team: None,
+                                            appearance_context: None,
                                         },
                                     );
                                 }
